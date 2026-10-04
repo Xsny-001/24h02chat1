@@ -15,13 +15,14 @@
 
 ## 二、执行 SQL 迁移（顺序不可打乱）
 1. 打开 Supabase 控制台 → **SQL Editor → New query**
-2. 依次粘贴并执行以下 5 个文件内容：
+2. **推荐（一次搞定）**：打开仓库里的 `supabase/00_all_in_one.sql`，整段复制，在 SQL Editor 粘贴后点 **Run** 一次即可（已按 schema→triggers→policies→rpc→rpc_patch 顺序合并好）。
+3. 若想分步执行，也可依次粘贴以下 5 个文件：
    1. `supabase/schema.sql`
    2. `supabase/triggers.sql`
    3. `supabase/policies.sql`
    4. `supabase/rpc.sql`
    5. `supabase/rpc_patch.sql`（补丁：本人撤回、私聊举报）
-3. 全部执行无报错即完成。可到 **Table Editor** 看到 `users/rooms/messages/dms/blocks/reports/audit/mutes` 八张表。
+4. 全部执行无报错即完成。可到 **Table Editor** 看到 `users/rooms/messages/dms/blocks/reports/audit/mutes` 八张表。
 
 ## 三、Auth 设置
 - **Authentication → Providers → Email**：关闭 **Confirm email**（否则注册后需验证邮箱才能登录）。
