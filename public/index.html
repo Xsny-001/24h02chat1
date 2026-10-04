@@ -563,13 +563,14 @@
   async function doAuth(){
     const username=el.aUser.value.trim(); const password=el.aPass.value;
     if(!username||!password) return showBox(el.authMsg,'请填写用户名和密码','err');
-    const email=username+'@local.chat';
+    const email=username+'@'+new URL(window.SUPABASE_URL).hostname;
     if(regMode){
       if(password!==el.aPass2.value) return showBox(el.authMsg,'两次输入的密码不一致','err');
       el.authSubmit.disabled=true;
-      const {error}=await sb.auth.signUp({email,password,options:{data:{username}}});
+      const {data:sud,error}=await sb.auth.signUp({email,password,options:{data:{username}}});
       el.authSubmit.disabled=false;
       if(error) return showBox(el.authMsg,'注册失败：'+error.message,'err');
+      if(!sud.session) return showBox(el.authMsg,'注册成功！若要求邮箱验证，请在 Supabase 后台 Authentication → Providers → Email 关闭 Confirm email 后重新注册','ok');
       await boot();
     } else {
       el.authSubmit.disabled=true;
