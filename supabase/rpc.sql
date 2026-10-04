@@ -172,7 +172,7 @@ begin
   if not (public.is_mod_plus() or exists(select 1 from public.dms d where d.id=mid and d.conv_key=conv and d.from_id=auth.uid())) then
     raise exception 'no_permission';
   end if;
-  update public.dms set recalled=true, recalled_by=(select username from public.users where id=auth.uid()), text='' where id=mid and conv_key=conv;
+  update public.dms set recalled=true, recalled_by=(select username from public.users where id=auth.uid()) where id=mid and conv_key=conv;
   perform public.log_audit('message.recall', '私聊', mid::text);
 end;
 $$;
