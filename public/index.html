@@ -1,0 +1,1727 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>聊天室</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --panel-3: #232833;
+    --border: #272c37; --text: #e6e8ee; --muted: #8b93a7;
+    --accent: #4f8cff; --accent-soft: #4f8cff22;
+    --ok: #3ddc97; --warn: #ffb020; --danger: #ff5c5c; --purple: #a78bfa;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); overflow: hidden;
+  }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #2f3542; border-radius: 4px; }
+
+  .hidden { display: none !important; }
+
+  /* ---------- 认证层 ---------- */
+  #auth {
+    position: fixed; inset: 0; z-index: 50; display: flex;
+    align-items: center; justify-content: center;
+    background: radial-gradient(1200px 600px at 50% -10%, #1b2333 0%, var(--bg) 60%);
+    overflow-y: auto; padding: 24px;
+  }
+  .card {
+    width: min(94vw, 420px); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 16px; padding: 28px;
+    box-shadow: 0 24px 60px #0008;
+  }
+  .card h1 { margin: 0 0 6px; font-size: 22px; }
+  .card p.sub { margin: 0 0 22px; color: var(--muted); font-size: 13px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 20px; background: var(--panel-2);
+          padding: 4px; border-radius: var(--radius); }
+  .tabs button {
+    flex: 1; padding: 9px; background: transparent; border: 0;
+    border-radius: 7px; cursor: pointer; color: var(--muted); font-weight: 600;
+  }
+  .tabs button.on { background: var(--accent); color: #fff; }
+  .field { margin-bottom: 15px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .input {
+    width: 100%; padding: 11px 13px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: var(--radius); outline: none;
+    transition: border-color .15s;
+  }
+  .input:focus { border-color: var(--accent); }
+  .btn {
+    width: 100%; padding: 12px; background: var(--accent); color: #fff;
+    border: 0; border-radius: var(--radius); font-weight: 600; cursor: pointer;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.ghost { background: var(--panel-2); border: 1px solid var(--border); }
+  .btn.ghost:hover { border-color: var(--accent); }
+  .btn.danger { background: var(--danger); }
+  .btn.sm { width: auto; padding: 5px 12px; font-size: 12px; border-radius: 7px; }
+  .msg-box {
+    padding: 10px 13px; border-radius: var(--radius); font-size: 13px;
+    margin-bottom: 15px; display: none; line-height: 1.45;
+  }
+  .msg-box.on { display: block; }
+  .msg-box.err { background: #ff5c5c1a; border: 1px solid #ff5c5c55; color: #ffb3b3; }
+  .msg-box.ok { background: #3ddc971a; border: 1px solid #3ddc9755; color: #a8f0cf; }
+  .msg-box.info { background: #4f8cff1a; border: 1px solid #4f8cff55; color: #bcd6ff; }
+  .tip { font-size: 12px; color: var(--muted); margin-top: 14px; text-align: center; line-height: 1.6; }
+
+  /* ---------- 主界面 ---------- */
+  #app { display: none; height: 100%; grid-template-columns: 250px 1fr; }
+  #app.on { display: grid; }
+  aside { background: var(--panel); border-right: 1px solid var(--border);
+          display: flex; flex-direction: column; min-height: 0; }
+  .brand { padding: 15px 16px; border-bottom: 1px solid var(--border);
+           display: flex; align-items: center; gap: 9px; }
+  .brand .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: 0 0 auto; }
+  .brand .dot.off { background: var(--danger); }
+  .brand b { font-size: 15px; flex: 1; }
+  .side-scroll { flex: 1; overflow-y: auto; padding: 14px; min-height: 0; }
+  .side-title { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+                color: var(--muted); margin: 4px 0 9px; display: flex;
+                justify-content: space-between; align-items: center; }
+  .room { display: flex; align-items: center; justify-content: space-between;
+          padding: 9px 11px; border-radius: var(--radius); cursor: pointer;
+          margin-bottom: 3px; color: var(--muted); transition: background .13s, color .13s; }
+  .room:hover { background: var(--panel-2); color: var(--text); }
+  .room.on { background: var(--accent-soft); color: #cfe0ff; font-weight: 600; }
+  .room .cnt { font-size: 11px; background: var(--panel-2); padding: 1px 7px;
+               border-radius: 999px; }
+  .room.on .cnt { background: #ffffff1a; }
+  .lock { font-size: 11px; opacity: .7; }
+  .user { display: flex; align-items: center; gap: 9px; padding: 6px 4px; font-size: 13px; }
+  .av { width: 26px; height: 26px; border-radius: 50%; flex: 0 0 auto;
+        display: grid; place-items: center; font-size: 11px; font-weight: 700; color: #fff; }
+  .badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; font-weight: 700; margin-left: auto; }
+  .badge.admin { background: #a78bfa2a; color: var(--purple); }
+  .badge.mod { background: #ffb0202a; color: var(--warn); }
+  .me-tag { font-size: 11px; color: var(--muted); margin-left: auto; }
+  .side-foot { padding: 12px; border-top: 1px solid var(--border); }
+  .whoami { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; font-size: 13px; }
+
+  main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  header { padding: 13px 20px; border-bottom: 1px solid var(--border);
+           display: flex; align-items: center; gap: 12px; background: var(--panel); }
+  header h2 { margin: 0; font-size: 15px; }
+  header .meta { color: var(--muted); font-size: 12px; margin-left: auto; }
+  .hbtn { background: var(--panel-2); border: 1px solid var(--border);
+          padding: 6px 13px; border-radius: 7px; cursor: pointer; font-size: 12px; }
+  .hbtn:hover { border-color: var(--accent); }
+
+  #announce {
+    display: none; padding: 10px 20px; background: #ffb02014;
+    border-bottom: 1px solid #ffb02033; font-size: 13px; color: #ffd591;
+  }
+  #announce.on { display: block; }
+
+  #feed { flex: 1; overflow-y: auto; padding: 20px; min-height: 0; }
+  .sys { text-align: center; color: var(--muted); font-size: 12px; margin: 14px 0; }
+  .sys span { background: var(--panel-2); padding: 3px 12px; border-radius: 999px; }
+
+  .msg { display: flex; gap: 10px; margin-bottom: 16px; }
+  .msg.self { flex-direction: row-reverse; }
+  .msg .body { max-width: min(680px, 72%); }
+  .msg .top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px;
+              font-size: 12px; color: var(--muted); }
+  .msg.self .top { flex-direction: row-reverse; }
+  .msg .top b { color: var(--text); font-size: 13px; font-weight: 600; }
+  .bubble { background: var(--panel-2); border: 1px solid var(--border);
+            padding: 9px 13px; border-radius: 3px 12px 12px 12px;
+            white-space: pre-wrap; word-break: break-word; }
+  .msg.self .bubble { background: var(--accent); border-color: var(--accent);
+                      color: #fff; border-radius: 12px 3px 12px 12px; }
+  .msg.recalled .bubble { background: transparent; border-style: dashed;
+                          color: var(--muted); font-style: italic; font-size: 13px; }
+  .acts { display: flex; gap: 4px; margin-top: 5px; opacity: 0; transition: opacity .15s; }
+  .msg:hover .acts { opacity: 1; }
+  .msg.self .acts { justify-content: flex-end; }
+  .act { font-size: 11px; background: var(--panel-2); border: 1px solid var(--border);
+         color: var(--muted); padding: 2px 8px; border-radius: 6px; cursor: pointer; }
+  .act:hover { color: var(--text); border-color: var(--accent); }
+  .act.del:hover { color: var(--danger); border-color: var(--danger); }
+
+  #typing { height: 20px; padding: 0 20px 4px; font-size: 12px;
+            color: var(--muted); font-style: italic; }
+  #muteBar { display: none; padding: 10px 20px; background: #ff5c5c14;
+             border-top: 1px solid #ff5c5c33; font-size: 13px; color: #ffb3b3; }
+  #muteBar.on { display: block; }
+
+  footer { border-top: 1px solid var(--border); padding: 14px 20px; background: var(--panel); }
+  .composer { display: flex; gap: 10px; align-items: flex-end; }
+  #input { flex: 1; resize: none; max-height: 150px; padding: 11px 13px;
+           line-height: 1.5; background: var(--panel-2); border: 1px solid var(--border);
+           border-radius: var(--radius); outline: none; }
+  #input:focus { border-color: var(--accent); }
+  #send { padding: 11px 22px; background: var(--accent); color: #fff; border: 0;
+          border-radius: var(--radius); font-weight: 600; cursor: pointer; }
+  #send:disabled { opacity: .45; cursor: not-allowed; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 7px; }
+  kbd { background: var(--panel-2); border: 1px solid var(--border);
+        border-radius: 4px; padding: 1px 5px; font-size: 10px; font-family: inherit; }
+
+  /* ---------- 通用弹层 ---------- */
+  .overlay { position: fixed; inset: 0; background: #000a; z-index: 100;
+             display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .modal { background: var(--panel); border: 1px solid var(--border);
+           border-radius: 14px; width: min(94vw, 900px); max-height: 88vh;
+           display: flex; flex-direction: column; overflow: hidden; }
+  .modal.narrow { width: min(94vw, 460px); }
+  .modal-head { padding: 16px 20px; border-bottom: 1px solid var(--border);
+                display: flex; align-items: center; gap: 14px; }
+  .modal-head h3 { margin: 0; font-size: 16px; flex: 1; }
+  .close { background: none; border: 0; color: var(--muted); font-size: 22px;
+           cursor: pointer; line-height: 1; padding: 0 4px; }
+  .close:hover { color: var(--text); }
+  .mtabs { display: flex; gap: 4px; padding: 12px 20px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .mtabs button { background: none; border: 0; padding: 9px 14px; cursor: pointer;
+                  color: var(--muted); border-bottom: 2px solid transparent;
+                  font-weight: 600; font-size: 13px; }
+  .mtabs button.on { color: var(--accent); border-bottom-color: var(--accent); }
+  .mtabs button .pill { background: var(--danger); color: #fff; font-size: 10px;
+                        border-radius: 999px; padding: 1px 6px; margin-left: 5px; }
+  .modal-body { padding: 18px 20px; overflow-y: auto; flex: 1; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase;
+       letter-spacing: .06em; color: var(--muted); padding: 8px 10px;
+       border-bottom: 1px solid var(--border); font-weight: 600; }
+  td { padding: 10px; border-bottom: 1px solid #20242d; vertical-align: middle; }
+  tr:hover td { background: #ffffff05; }
+  .tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
+  .tag.active { background: #3ddc9722; color: var(--ok); }
+  .tag.pending { background: #ffb02022; color: var(--warn); }
+  .tag.banned { background: #ff5c5c22; color: var(--danger); }
+  .tag.admin { background: #a78bfa22; color: var(--purple); }
+  .tag.mod { background: #ffb02022; color: var(--warn); }
+  .tag.user { background: #4f8cff22; color: var(--accent); }
+  .tag.open { background: #ff5c5c22; color: var(--danger); }
+  .tag.resolved { background: #3ddc9722; color: var(--ok); }
+  .tag.dismissed { background: #8b93a722; color: var(--muted); }
+  .row-acts { display: flex; gap: 6px; flex-wrap: wrap; }
+  .empty { text-align: center; color: var(--muted); padding: 40px 0; font-size: 13px; }
+  .bar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+
+  /* ---------- 侧栏 Tab ---------- */
+  .tabs-mini { display: flex; gap: 5px; background: var(--panel-2); padding: 4px;
+               border-radius: var(--radius); margin-bottom: 14px; }
+  .tabs-mini button { flex: 1; padding: 7px; background: transparent; border: 0;
+                      border-radius: 7px; cursor: pointer; color: var(--muted);
+                      font-weight: 600; font-size: 13px; position: relative; }
+  .tabs-mini button.on { background: var(--accent); color: #fff; }
+  .dot-badge { display: none; position: absolute; top: 2px; right: 8px;
+               min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
+               background: var(--danger); color: #fff; font-size: 10px;
+               line-height: 16px; font-weight: 700; }
+  .dot-badge.on { display: inline-block; }
+  .dm-search { font-size: 13px; padding: 8px 10px; margin-bottom: 8px; }
+
+  /* 会话条目 */
+  .conv { display: flex; align-items: center; gap: 9px; padding: 9px 10px;
+          border-radius: var(--radius); cursor: pointer; margin-bottom: 2px;
+          transition: background .13s; }
+  .conv:hover { background: var(--panel-2); }
+  .conv.on { background: var(--accent-soft); }
+  .conv .info { flex: 1; min-width: 0; }
+  .conv .nm { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .conv .pv { font-size: 11px; color: var(--muted); white-space: nowrap;
+              overflow: hidden; text-overflow: ellipsis; }
+  .conv .unread { background: var(--danger); color: #fff; font-size: 10px;
+                  min-width: 17px; height: 17px; line-height: 17px; text-align: center;
+                  border-radius: 999px; padding: 0 5px; font-weight: 700; flex: 0 0 auto; }
+  .online-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+  .online-dot.on { background: var(--ok); }
+
+  /* 附件 */
+  .upload-bar { font-size: 12px; color: var(--muted); margin-top: 6px; display: none; }
+  .upload-bar.on { display: block; }
+  .attach-card { display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+                 background: var(--panel-2); border: 1px solid var(--border);
+                 border-radius: var(--radius); margin-top: 6px; max-width: 320px; }
+  .msg.self .attach-card { background: #ffffff1a; border-color: #ffffff33; }
+  .attach-card .ico { font-size: 20px; }
+  .attach-card .meta2 { min-width: 0; }
+  .attach-card .nm2 { font-size: 13px; word-break: break-all; }
+  .attach-card .sz { font-size: 11px; color: var(--muted); }
+  .msg.self .attach-card .sz { color: #ffffffaa; }
+  .attach-img { max-width: 260px; max-height: 260px; border-radius: 8px;
+                display: block; cursor: pointer; }
+  .read-tag { font-size: 10px; color: var(--muted); }
+  .read-tag.read { color: var(--ok); }
+
+  /* 会话操作菜单 */
+  .menu { position: absolute; background: var(--panel-3); border: 1px solid var(--border);
+          border-radius: 9px; padding: 5px; z-index: 120; box-shadow: 0 12px 30px #0009;
+          min-width: 150px; }
+  .menu button { display: block; width: 100%; text-align: left; background: none;
+                 border: 0; padding: 8px 12px; border-radius: 6px; cursor: pointer;
+                 font-size: 13px; color: var(--text); }
+  .menu button:hover { background: var(--panel-2); }
+  .menu button.danger { color: #ffb3b3; }
+
+  @media (max-width: 860px) {
+    #app { grid-template-columns: 1fr; }
+    aside { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ================= 登录 / 注册 ================= -->
+<div id="auth">
+  <div class="card">
+    <h1 id="authTitle">登录聊天室</h1>
+    <p class="sub" id="authSub">输入账号密码继续</p>
+
+    <div class="tabs">
+      <button id="tabLogin" class="on">登录</button>
+      <button id="tabReg">注册</button>
+    </div>
+
+    <div class="msg-box" id="authMsg"></div>
+
+    <div class="field">
+      <label for="aUser">用户名</label>
+      <input id="aUser" class="input" maxlength="20" autocomplete="username" />
+    </div>
+    <div class="field">
+      <label for="aPass">密码</label>
+      <input id="aPass" class="input" type="password" autocomplete="current-password" />
+    </div>
+    <div class="field hidden" id="pass2Field">
+      <label for="aPass2">确认密码</label>
+      <input id="aPass2" class="input" type="password" autocomplete="new-password" />
+    </div>
+
+    <button class="btn" id="authSubmit">登录</button>
+    <p class="tip" id="authTip"></p>
+  </div>
+</div>
+
+<!-- ================= 主界面 ================= -->
+<div id="app">
+  <aside>
+    <div class="brand">
+      <span class="dot" id="dot"></span>
+      <b>聊天室</b>
+    </div>
+    <div class="side-scroll">
+      <div class="tabs-mini">
+        <button id="tabRooms" class="on">房间</button>
+        <button id="tabDms">私聊<span class="dot-badge" id="dmBadge"></span></button>
+      </div>
+
+      <div id="paneRooms">
+        <div class="side-title">
+          <span>房间列表</span>
+          <span id="newRoomBtn" style="cursor:pointer;display:none">+ 新建</span>
+        </div>
+        <div id="roomlist"></div>
+        <div class="side-title" style="margin-top:20px">
+          <span>在线成员</span><span id="onlineCnt">0</span>
+        </div>
+        <div id="userlist"></div>
+      </div>
+
+      <div id="paneDms" class="hidden">
+        <div class="side-title">
+          <span>会话</span>
+          <span id="newDmBtn" style="cursor:pointer">+ 发起</span>
+        </div>
+        <input id="dmSearch" class="input dm-search" placeholder="搜索会话或消息…" />
+        <div id="convlist"></div>
+        <div class="side-title" style="margin-top:18px">
+          <span>黑名单</span>
+        </div>
+        <div id="blocklist"></div>
+      </div>
+    </div>
+    <div class="side-foot">
+      <div class="whoami">
+        <div class="av" id="myAv"></div>
+        <span id="myName"></span>
+        <span id="myRole"></span>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="hbtn" id="adminBtn" style="flex:1;display:none">管理后台</button>
+        <button class="hbtn" id="logoutBtn" style="flex:1">退出</button>
+      </div>
+    </div>
+  </aside>
+
+  <main>
+    <header>
+      <h2 id="roomTitle">—</h2>
+      <span id="dmPeerState" class="meta" style="display:none"></span>
+      <button class="hbtn" id="peerMenuBtn" style="display:none">⋯</button>
+      <span class="meta" id="connState">连接中…</span>
+    </header>
+
+    <div id="announce"></div>
+    <div id="feed"></div>
+    <div id="typing"></div>
+    <div id="muteBar"></div>
+
+    <footer>
+      <div class="composer">
+        <button class="hbtn" id="attachBtn" title="发送文件">📎</button>
+        <input type="file" id="fileInput" class="hidden" />
+        <textarea id="input" rows="1" placeholder="输入消息…"></textarea>
+        <button id="send">发送</button>
+      </div>
+      <div class="hint" id="composerHint">
+        <kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行 · 悬停消息可撤回或举报
+      </div>
+      <div id="uploadBar" class="upload-bar"></div>
+    </footer>
+  </main>
+</div>
+
+<!-- 建房间弹层 -->
+<div class="overlay hidden" id="roomModal">
+  <div class="modal narrow">
+    <div class="modal-head"><h3>新建房间</h3><button class="close" data-close>×</button></div>
+    <div class="modal-body">
+      <div class="msg-box" id="roomMsg"></div>
+      <div class="field">
+        <label>房间名称</label>
+        <input id="rName" class="input" maxlength="24" placeholder="例如：项目讨论" />
+      </div>
+      <div class="field">
+        <label>房间类型</label>
+        <select id="rType" class="input">
+          <option value="public">公开 —— 所有登录用户可见可进</option>
+          <option value="private">私有 —— 仅管理员添加的成员可进</option>
+        </select>
+      </div>
+      <button class="btn" id="rCreate">创建</button>
+    </div>
+  </div>
+</div>
+
+<!-- 举报弹层 -->
+<div class="overlay hidden" id="reportModal">
+  <div class="modal narrow">
+    <div class="modal-head"><h3 id="reportTitle">举报消息</h3><button class="close" data-close>×</button></div>
+    <div class="modal-body">
+      <div class="msg-box" id="reportMsg"></div>
+      <div class="field">
+        <label>举报原因</label>
+        <textarea id="rpReason" class="input" rows="4" maxlength="500"
+                  placeholder="请说明该消息违反了哪条规则…"></textarea>
+      </div>
+      <button class="btn danger" id="rpSubmit">提交举报</button>
+    </div>
+  </div>
+</div>
+
+<!-- 发起私聊弹层 -->
+<div class="overlay hidden" id="pickUserModal">
+  <div class="modal narrow">
+    <div class="modal-head"><h3>发起私聊</h3><button class="close" data-close>×</button></div>
+    <div class="modal-body">
+      <div class="msg-box" id="pickMsg"></div>
+      <input id="pickSearch" class="input" placeholder="搜索用户名…" style="margin-bottom:12px" />
+      <div id="pickList"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 管理后台 ================= -->
+<div class="overlay hidden" id="adminModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>管理后台</h3>
+      <button class="close" data-close>×</button>
+    </div>
+    <div class="mtabs" id="admTabs">
+      <button data-tab="users" class="on">用户管理</button>
+      <button data-tab="approve" id="tabApprove">待审批</button>
+      <button data-tab="rooms">房间管理</button>
+      <button data-tab="messages">消息管理</button>
+      <button data-tab="dms" id="tabDms">私聊审计</button>
+      <button data-tab="reports" id="tabReports">举报处理</button>
+      <button data-tab="audit">审计日志</button>
+    </div>
+    <div class="modal-body" id="admBody"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const el = {
+    auth: $('auth'), app: $('app'), authTitle: $('authTitle'), authSub: $('authSub'),
+    tabLogin: $('tabLogin'), tabReg: $('tabReg'), aUser: $('aUser'), aPass: $('aPass'),
+    aPass2: $('aPass2'), pass2Field: $('pass2Field'), authSubmit: $('authSubmit'),
+    authMsg: $('authMsg'), authTip: $('authTip'),
+    feed: $('feed'), input: $('input'), send: $('send'), typing: $('typing'),
+    roomlist: $('roomlist'), userlist: $('userlist'), roomTitle: $('roomTitle'),
+    onlineCnt: $('onlineCnt'), connState: $('connState'), dot: $('dot'),
+    myAv: $('myAv'), myName: $('myName'), myRole: $('myRole'),
+    adminBtn: $('adminBtn'), logoutBtn: $('logoutBtn'), newRoomBtn: $('newRoomBtn'),
+    announce: $('announce'), muteBar: $('muteBar'),
+    adminModal: $('adminModal'), admBody: $('admBody'), admTabs: $('admTabs'),
+    roomModal: $('roomModal'), reportModal: $('reportModal'),
+    // 私聊相关
+    tabRooms: $('tabRooms'), tabDms: $('tabDms'), paneRooms: $('paneRooms'),
+    paneDms: $('paneDms'), convlist: $('convlist'), dmSearch: $('dmSearch'),
+    dmBadge: $('dmBadge'), newDmBtn: $('newDmBtn'), blocklist: $('blocklist'),
+    dmPeerState: $('dmPeerState'), peerMenuBtn: $('peerMenuBtn'),
+    attachBtn: $('attachBtn'), fileInput: $('fileInput'), uploadBar: $('uploadBar'),
+    composerHint: $('composerHint'),
+    pickUserModal: $('pickUserModal'), pickSearch: $('pickSearch'),
+    pickList: $('pickList'), pickMsg: $('pickMsg'),
+  };
+
+  let me = null, perms = [], ws = null;
+  let rooms = [], roomId = null, muteUntil = 0;
+  let typingTimer = null, lastTypingSent = 0;
+  const typingPeers = new Map();
+  let replyTarget = null;   // 当前要举报的消息
+  let admTab = 'users';
+
+  // 私聊状态
+  let mode = 'room';            // 'room' | 'dm'
+  let convs = [];               // 会话列表
+  let convKey = null;           // 当前打开的会话 key
+  let peer = null;              // 当前会话对方
+  let peerOnline = false;
+  let peerBlocked = false;      // 我拉黑了对方
+  let peerBlockedMe = false;    // 对方拉黑了我
+  let blocks = [];              // 我的黑名单
+  let unreadTotal = 0;
+  let dmTypingTimer = null;
+  const dmTypingPeers = new Map();
+  let dmSearchTimer = null;
+
+  // ---------- 工具 ----------
+  const PALETTE = ['#4f8cff','#3ddc97','#ff9f43','#ff6b9d','#a78bfa','#22d3ee','#f7b731','#ff5c5c'];
+  const colorOf = (n) => { let h=0; for (let i=0;i<n.length;i++) h=(h*31+n.charCodeAt(i))>>>0; return PALETTE[h%PALETTE.length]; };
+  const initial = (n) => (n||'?').trim().charAt(0).toUpperCase();
+  const timeOf = (ts) => new Date(ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
+  const fullTime = (ts) => new Date(ts).toLocaleString('zh-CN',{hour12:false});
+  const can = (p) => perms.includes(p);
+  const el2 = (tag, cls, text) => { const d = document.createElement(tag); if (cls) d.className = cls; if (text != null) d.textContent = text; return d; };
+  const ROLE_LABEL = { admin: '管理员', mod: '版主', user: '普通用户' };
+
+  function showBox(node, text, kind) {
+    node.textContent = text;
+    node.className = 'msg-box on ' + (kind || 'info');
+  }
+  const hideBox = (node) => { node.className = 'msg-box'; };
+
+  async function api(method, url, body) {
+    const res = await fetch(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    let data = null;
+    try { data = await res.json(); } catch {}
+    return { status: res.status, data };
+  }
+
+  // ================= 认证 =================
+  let regMode = false;
+  function setAuthMode(reg) {
+    regMode = reg;
+    el.tabLogin.classList.toggle('on', !reg);
+    el.tabReg.classList.toggle('on', reg);
+    el.pass2Field.classList.toggle('hidden', !reg);
+    el.authTitle.textContent = reg ? '注册新账号' : '登录聊天室';
+    el.authSub.textContent = reg ? '注册后需管理员审批才能登录' : '输入账号密码继续';
+    el.authSubmit.textContent = reg ? '提交注册' : '登录';
+    el.authMsg.className = 'msg-box';
+    el.aPass.setAttribute('autocomplete', reg ? 'new-password' : 'current-password');
+    el.authTip.textContent = reg
+      ? '首个注册的账号将自动成为管理员'
+      : '';
+  }
+  el.tabLogin.onclick = () => setAuthMode(false);
+  el.tabReg.onclick = () => setAuthMode(true);
+
+  el.authSubmit.onclick = doAuth;
+  [el.aUser, el.aPass, el.aPass2].forEach((n) =>
+    n.addEventListener('keydown', (e) => { if (e.key === 'Enter') doAuth(); }));
+
+  async function doAuth() {
+    const username = el.aUser.value.trim();
+    const password = el.aPass.value;
+    if (!username || !password) return showBox(el.authMsg, '请填写用户名和密码', 'err');
+
+    if (regMode) {
+      if (password !== el.aPass2.value) return showBox(el.authMsg, '两次输入的密码不一致', 'err');
+      el.authSubmit.disabled = true;
+      const r = await api('POST', '/api/register', { username, password });
+      el.authSubmit.disabled = false;
+      if (r.status !== 200) return showBox(el.authMsg, r.data?.error || '注册失败', 'err');
+      if (r.data.pending) {
+        showBox(el.authMsg, '注册成功！请等待管理员审批后再登录。', 'ok');
+        el.aPass.value = el.aPass2.value = '';
+        setTimeout(() => setAuthMode(false), 1800);
+      } else {
+        // 首个用户：直接登录
+        await boot();
+      }
+    } else {
+      el.authSubmit.disabled = true;
+      const r = await api('POST', '/api/login', { username, password });
+      el.authSubmit.disabled = false;
+      if (r.status !== 200) return showBox(el.authMsg, r.data?.error || '登录失败', 'err');
+      await boot();
+    }
+  }
+
+  async function boot() {
+    const r = await api('GET', '/api/me');
+    if (r.status !== 200) return;
+    me = r.data.user;
+    perms = r.data.permissions;
+    enterApp();
+  }
+
+  function enterApp() {
+    el.auth.classList.add('hidden');
+    el.app.classList.add('on');
+    el.myName.textContent = me.username;
+    el.myRole.textContent = ROLE_LABEL[me.role];
+    el.myRole.className = 'badge ' + me.role;
+    el.myAv.style.background = colorOf(me.username);
+    el.myAv.textContent = initial(me.username);
+    el.adminBtn.style.display = can('user.manage') || can('chat.delete.any') ||
+      can('report.handle') || can('dm.view') ? 'block' : 'none';
+    el.newRoomBtn.style.display = can('room.create') ? 'inline' : 'none';
+    if (!can('dm.send')) el.tabDms.style.display = 'none';
+    loadRooms();
+    loadBlocks();
+    connect();
+  }
+
+  el.logoutBtn.onclick = async () => {
+    await api('POST', '/api/logout');
+    location.reload();
+  };
+
+  // ================= 房间列表 =================
+  async function loadRooms() {
+    const r = await api('GET', '/api/rooms');
+    if (r.status !== 200) return;
+    rooms = r.data.rooms;
+    renderRooms();
+    if (!roomId && rooms.length) joinRoom(rooms[0].id);
+  }
+
+  function renderRooms() {
+    el.roomlist.textContent = '';
+    rooms.forEach((room) => {
+      const d = el2('div', 'room' + (room.id === roomId ? ' on' : ''));
+      const left = el2('span');
+      left.append(document.createTextNode(room.name));
+      if (room.type === 'private') left.append(el2('span', 'lock', ' 🔒'));
+      const cnt = el2('span', 'cnt', room.online ?? '');
+      d.append(left, cnt);
+      d.onclick = () => joinRoom(room.id);
+      el.roomlist.appendChild(d);
+    });
+  }
+
+  function joinRoom(id) {
+    if (id === roomId) return;
+    roomId = id;
+    const room = rooms.find((x) => x.id === id);
+    el.roomTitle.textContent = room ? room.name : '—';
+    typingPeers.clear(); paintTyping();
+    renderRooms();
+    // 若 socket 尚未就绪，onopen 会补发 join
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'join', roomId: id }));
+    }
+  }
+
+  // ================= WebSocket =================
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+    ws.onopen = () => {
+      setStatus(true);
+      if (roomId) ws.send(JSON.stringify({ type: 'join', roomId }));
+    };
+
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      switch (m.type) {
+        case 'hello':
+          me = m.user; perms = m.permissions;
+          break;
+        case 'rooms':
+          rooms = m.rooms; renderRooms();
+          break;
+        case 'init':
+          roomId = m.roomId;
+          el.roomTitle.textContent = m.roomName;
+          el.announce.textContent = m.announce ? '📢 ' + m.announce : '';
+          el.announce.classList.toggle('on', !!m.announce);
+          el.feed.textContent = '';
+          (m.history || []).forEach(addMessage);
+          renderUsers(m.users || []);
+          scrollDown(true);
+          setMute(m.mute);
+          break;
+        case 'message': addMessage(m); break;
+        case 'recalled': markRecalled(m.messageId, m.by); break;
+        case 'system': addSystem(m.text); break;
+        case 'presence': renderUsers(m.users || []); break;
+        case 'typing': if (m.nick !== me.username) setTyping(m.nick, m.active); break;
+        case 'reported': toast(m.message); break;
+        case 'report:new': toast(`收到来自 ${m.nick} 的新举报`); break;
+        case 'muted': setMute({ until: m.until }); toast('你已被管理员禁言'); break;
+        case 'unmuted': setMute(null); toast('禁言已解除，可以正常发言了'); break;
+        case 'kicked':
+          alert(m.message || '账号状态已变更，请重新登录');
+          location.reload();
+          break;
+
+        // ---------- 私聊 ----------
+        case 'dm:init': renderDmInit(m); break;
+        case 'dm:message':
+          // 记录对方在线（收到消息即代表在线）
+          if (m.fromId !== me.id) onlinePeers.add(m.fromId);
+          // 只渲染当前打开的会话，其余仅更新列表
+          if (m.convKey === convKey) {
+            addDmMessage(m);
+            // 正在看该会话，立即回执已读
+            if (m.fromId !== me.id && ws.readyState === WebSocket.OPEN && peer) {
+              ws.send(JSON.stringify({ type: 'dm:open', peerId: peer.id }));
+            }
+          } else if (m.fromId !== me.id) {
+            toast(`收到来自 ${m.nick} 的私聊消息`);
+          }
+          loadConvs(el.dmSearch.value);
+          break;
+        case 'dm:recalled':
+          if (m.convKey === convKey) markDmRecalled(m.messageId, m.by);
+          loadConvs(el.dmSearch.value);
+          break;
+        case 'dm:typing':
+          if (m.fromId !== me.id && m.convKey === convKey) {
+            const existing = dmTypingPeers.get(m.fromId);
+            if (existing) clearTimeout(existing.timer);
+            if (m.active) {
+              dmTypingPeers.set(m.fromId, {
+                nick: m.nick,
+                timer: setTimeout(() => {
+                  dmTypingPeers.delete(m.fromId); renderTyping();
+                }, 3000),
+              });
+            } else {
+              dmTypingPeers.delete(m.fromId);
+            }
+            renderTyping();
+          }
+          break;
+        case 'dm:read':
+          // 对方已读我的消息，更新回执标签
+          el.feed.querySelectorAll('.read-tag').forEach((t) => {
+            t.className = 'read-tag read';
+            t.textContent = '已读';
+          });
+          break;
+        case 'dm:presence':
+          if (m.online) onlinePeers.add(m.userId); else onlinePeers.delete(m.userId);
+          if (peer && peer.id === m.userId) { peerOnline = m.online; renderPeerState(); }
+          renderConvs();
+          break;
+        case 'unread': {
+          unreadTotal = m.total || 0;
+          el.dmBadge.textContent = unreadTotal > 99 ? '99+' : unreadTotal;
+          el.dmBadge.classList.toggle('on', unreadTotal > 0);
+          break;
+        }
+        case 'error':
+          if (m.message.includes('禁言')) setMute({ until: Date.now() + 60000 });
+          toast('⚠ ' + m.message);
+          break;
+      }
+    };
+
+    ws.onclose = () => { setStatus(false); setTimeout(connect, 2000); };
+    ws.onerror = () => setStatus(false);
+  }
+
+  function setStatus(on) {
+    el.dot.className = 'dot' + (on ? '' : ' off');
+    el.connState.textContent = on ? '已连接' : '已断开';
+    updateSendState();
+  }
+
+  function setMute(mute) {
+    muteUntil = mute ? mute.until : 0;
+    if (muteUntil > Date.now()) {
+      const mins = Math.ceil((muteUntil - Date.now()) / 60000);
+      el.muteBar.textContent = `你已被禁言，剩余约 ${mins} 分钟，暂时无法发言`;
+      el.muteBar.classList.add('on');
+    } else {
+      el.muteBar.classList.remove('on');
+    }
+    updateSendState();
+  }
+
+  function updateSendState() {
+    const live = ws && ws.readyState === WebSocket.OPEN;
+    const muted = muteUntil > Date.now();
+    const blocked = mode === 'dm' && (peerBlocked || peerBlockedMe);
+    el.send.disabled = !live || muted || blocked;
+    el.input.disabled = muted || blocked;
+    if (el.attachBtn) el.attachBtn.disabled = !live || muted || blocked;
+    el.input.placeholder = muted ? '你已被禁言…'
+      : blocked ? '无法发送消息'
+      : mode === 'dm' ? `发消息给 ${peer ? peer.username : ''}…`
+      : '输入消息…';
+  }
+
+  // ================= 消息渲染 =================
+  const nearBottom = () =>
+    el.feed.scrollHeight - el.feed.scrollTop - el.feed.clientHeight < 120;
+  const scrollDown = (f) => { if (f || nearBottom()) el.feed.scrollTop = el.feed.scrollHeight; };
+
+  function addSystem(text) {
+    const d = el2('div', 'sys');
+    d.appendChild(el2('span', null, text));
+    el.feed.appendChild(d);
+    scrollDown();
+  }
+
+  function addMessage(m) {
+    const self = m.userId === (me && me.id);
+    const wrap = el2('div', 'msg' + (self ? ' self' : '') + (m.recalled ? ' recalled' : ''));
+    wrap.dataset.id = m.id;
+
+    const av = el2('div', 'av', initial(m.nick));
+    av.style.background = colorOf(m.nick);
+
+    const body = el2('div', 'body');
+    const top = el2('div', 'top');
+    top.append(el2('b', null, self ? '我' : m.nick), el2('span', null, timeOf(m.ts)));
+
+    const bubble = el2('div', 'bubble');
+    bubble.textContent = m.recalled ? '消息已撤回' : m.text;
+
+    const acts = el2('div', 'acts');
+    if (!m.recalled) {
+      // 撤回：自己的消息任何人可撤；他人消息需要 chat.recall.any
+      if (self || can('chat.recall.any')) {
+        const b = el2('button', 'act', '撤回');
+        b.onclick = () => ws.send(JSON.stringify({ type: 'recall', messageId: m.id }));
+        acts.append(b);
+      }
+      if (!self && can('chat.report')) {
+        const b = el2('button', 'act', '举报');
+        b.onclick = () => openReport(m);
+        acts.append(b);
+      }
+      if (!self && can('chat.delete.any')) {
+        const b = el2('button', 'act del', '删除');
+        b.onclick = async () => {
+          if (!confirm('确定永久删除这条消息？')) return;
+          await api('DELETE', '/api/admin/messages', { roomId, messageId: m.id });
+          wrap.remove();
+        };
+        acts.append(b);
+      }
+    }
+
+    body.append(top, bubble, acts);
+    wrap.append(av, body);
+    el.feed.appendChild(wrap);
+    scrollDown();
+  }
+
+  function markRecalled(messageId, by) {
+    const wrap = el.feed.querySelector(`[data-id="${messageId}"]`);
+    if (!wrap) return;
+    wrap.classList.add('recalled');
+    wrap.querySelector('.bubble').textContent = `消息已被 ${by} 撤回`;
+    const acts = wrap.querySelector('.acts');
+    if (acts) acts.textContent = '';
+  }
+
+  function renderUsers(users) {
+    el.userlist.textContent = '';
+    el.onlineCnt.textContent = users.length;
+    users.forEach((u) => {
+      const d = el2('div', 'user');
+      const av = el2('div', 'av', initial(u)); av.style.background = colorOf(u);
+      d.append(av, el2('span', null, u));
+      if (me && u === me.username) d.append(el2('span', 'me-tag', '我'));
+      el.userlist.appendChild(d);
+    });
+  }
+
+  function setTyping(nick, active) {
+    if (typingPeers.has(nick)) clearTimeout(typingPeers.get(nick));
+    if (active) typingPeers.set(nick, setTimeout(() => { typingPeers.delete(nick); paintTyping(); }, 3000));
+    else typingPeers.delete(nick);
+    paintTyping();
+  }
+  function paintTyping() {
+    const names = [...typingPeers.keys()];
+    el.typing.textContent = !names.length ? ''
+      : names.length === 1 ? `${names[0]} 正在输入…`
+      : `${names.slice(0,3).join('、')} 正在输入…`;
+  }
+
+  let toastTimer = null;
+  function toast(text) {
+    let t = $('toast');
+    if (!t) {
+      t = el2('div', null, '');
+      t.id = 'toast';
+      t.style.cssText = 'position:fixed;bottom:28px;left:50%;transform:translateX(-50%);' +
+        'background:#232833;border:1px solid #272c37;padding:10px 20px;border-radius:10px;' +
+        'font-size:13px;z-index:200;box-shadow:0 10px 30px #0008';
+      document.body.appendChild(t);
+    }
+    t.textContent = text;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.remove(), 3000);
+  }
+
+  // ================= 发送消息 =================
+  function sendMessage() {
+    const text = el.input.value.replace(/\s+$/, '');
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (muteUntil > Date.now()) return;
+
+    if (mode === 'dm') {
+      if (!peer) return;
+      if (peerBlocked || peerBlockedMe) { toast('无法发送：你们之间存在拉黑关系'); return; }
+      ws.send(JSON.stringify({ type: 'dm:message', peerId: peer.id, text }));
+      ws.send(JSON.stringify({ type: 'dm:typing', peerId: peer.id, active: false }));
+    } else {
+      ws.send(JSON.stringify({ type: 'message', text }));
+      ws.send(JSON.stringify({ type: 'typing', active: false }));
+    }
+    el.input.value = '';
+    el.input.style.height = 'auto';
+  }
+  const autoGrow = () => {
+    el.input.style.height = 'auto';
+    el.input.style.height = Math.min(el.input.scrollHeight, 150) + 'px';
+  };
+  el.send.onclick = sendMessage;
+  el.input.addEventListener('input', () => {
+    autoGrow();
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const now = Date.now();
+    if (mode === 'dm') {
+      if (!peer) return;
+      if (now - lastTypingSent > 1200) {
+        ws.send(JSON.stringify({ type: 'dm:typing', peerId: peer.id, active: true }));
+        lastTypingSent = now;
+      }
+      clearTimeout(dmTypingTimer);
+      dmTypingTimer = setTimeout(
+        () => ws.send(JSON.stringify({ type: 'dm:typing', peerId: peer.id, active: false })), 1500);
+    } else {
+      if (now - lastTypingSent > 1200) {
+        ws.send(JSON.stringify({ type: 'typing', active: true }));
+        lastTypingSent = now;
+      }
+      clearTimeout(typingTimer);
+      typingTimer = setTimeout(() => ws.send(JSON.stringify({ type: 'typing', active: false })), 1500);
+    }
+  });
+  el.input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); }
+  });
+
+  // ================= 私聊 =================
+  // 侧栏 tab 切换
+  el.tabRooms.onclick = () => setMode('room');
+  el.tabDms.onclick = () => setMode('dm');
+
+  function setMode(m) {
+    mode = m;
+    el.tabRooms.classList.toggle('on', m === 'room');
+    el.tabDms.classList.toggle('on', m === 'dm');
+    el.paneRooms.classList.toggle('hidden', m !== 'room');
+    el.paneDms.classList.toggle('hidden', m !== 'dm');
+    el.dmPeerState.style.display = m === 'dm' ? 'inline' : 'none';
+    el.peerMenuBtn.style.display = m === 'dm' && peer ? 'block' : 'none';
+    el.composerHint.textContent = m === 'dm'
+      ? 'Enter 发送 · 私聊内容仅双方可见'
+      : 'Enter 发送 · Shift+Enter 换行 · 悬停消息可撤回或举报';
+
+    if (m === 'dm') {
+      el.roomTitle.textContent = peer ? peer.username : '私聊';
+      el.announce.classList.remove('on');
+      renderConvs();
+      renderBlocks();
+      loadConvs();
+      if (!peer) {
+        el.feed.textContent = '';
+        el.feed.appendChild(el2('div', 'empty', '从左侧选择一个会话，或点「+ 发起」开始新的私聊'));
+      }
+    } else {
+      el.roomTitle.textContent = (rooms.find((r) => r.id === roomId) || {}).name || '—';
+      dmTypingPeers.clear();
+      renderTyping();
+      if (roomId && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'join', roomId }));
+      }
+    }
+    updateSendState();
+  }
+
+  async function loadConvs(q) {
+    const url = '/api/dm/conversations' + (q ? '?q=' + encodeURIComponent(q) : '');
+    const r = await api('GET', url);
+    if (r.status !== 200) return;
+    convs = r.data.conversations;
+    renderConvs();
+  }
+
+  function renderConvs() {
+    el.convlist.textContent = '';
+    if (!convs.length) {
+      el.convlist.appendChild(el2('div', 'empty', '暂无会话'));
+      return;
+    }
+    convs.forEach((cv) => {
+      const d = el2('div', 'conv' + (cv.convKey === convKey ? ' on' : ''));
+      const av = el2('div', 'av', initial(cv.peerName));
+      av.style.background = colorOf(cv.peerName);
+
+      const info = el2('div', 'info');
+      const nm = el2('div', 'nm');
+      const dot = el2('span', 'online-dot' + (onlinePeers.has(cv.peerId) ? ' on' : ''));
+      nm.append(dot, el2('span', null, cv.peerName));
+      if (cv.blocked) nm.append(el2('span', 'read-tag', '已拉黑'));
+      const pv = el2('div', 'pv', cv.lastText || '');
+      info.append(nm, pv);
+
+      d.append(av, info);
+      if (cv.unread) d.append(el2('span', 'unread', cv.unread > 99 ? '99+' : cv.unread));
+
+      d.onclick = () => openDm(cv.peerId);
+      el.convlist.appendChild(d);
+    });
+  }
+
+  function renderBlocks() {
+    el.blocklist.textContent = '';
+    if (!blocks.length) {
+      el.blocklist.appendChild(el2('div', 'empty', '无'));
+      return;
+    }
+    blocks.forEach((b) => {
+      const d = el2('div', 'conv');
+      const av = el2('div', 'av', initial(b.user.username));
+      av.style.background = colorOf(b.user.username);
+      const info = el2('div', 'info');
+      info.append(el2('div', 'nm', b.user.username));
+      const btn = el2('button', 'act', '解除');
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        await api('POST', `/api/dm/${b.user.id}/block`, { blocked: false });
+        toast('已解除拉黑');
+        loadBlocks(); loadConvs();
+        if (peer && peer.id === b.user.id) { peerBlocked = false; updateSendState(); }
+      };
+      d.append(av, info, btn);
+      el.blocklist.appendChild(d);
+    });
+  }
+
+  async function loadBlocks() {
+    const r = await api('GET', '/api/dm/blocks/list');
+    if (r.status === 200) { blocks = r.data.blocks; renderBlocks(); }
+  }
+
+  async function openDm(peerId) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    setMode('dm');
+    // 先标记为打开中，避免重复请求
+    convKey = null;
+    ws.send(JSON.stringify({ type: 'dm:open', peerId }));
+  }
+
+  function renderDmInit(m) {
+    convKey = m.convKey;
+    peer = m.peer;
+    peerOnline = !!m.online;
+    peerBlocked = !!m.blocked;
+    peerBlockedMe = !!m.blockedMe;
+
+    el.roomTitle.textContent = peer.username;
+    el.peerMenuBtn.style.display = 'block';
+    el.feed.textContent = '';
+    (m.history || []).forEach(addDmMessage);
+
+    if (peerBlocked) {
+      el.feed.appendChild(el2('div', 'sys', '')).appendChild(
+        el2('span', null, `你已拉黑 ${peer.username}，无法收发消息`));
+    } else if (peerBlockedMe) {
+      el.feed.appendChild(el2('div', 'sys', '')).appendChild(
+        el2('span', null, '对方已将你拉黑，消息无法送达'));
+    }
+    scrollDown(true);
+    renderPeerState();
+    renderConvs();
+    updateSendState();
+  }
+
+  function renderPeerState() {
+    if (mode !== 'dm' || !peer) return;
+    el.dmPeerState.textContent = peerOnline ? '● 在线' : '○ 离线';
+    el.dmPeerState.style.color = peerOnline ? 'var(--ok)' : 'var(--muted)';
+  }
+
+  function addDmMessage(m) {
+    const self = m.fromId === (me && me.id);
+    const wrap = el2('div', 'msg' + (self ? ' self' : '') + (m.recalled ? ' recalled' : ''));
+    wrap.dataset.id = m.id;
+
+    const av = el2('div', 'av', initial(m.nick));
+    av.style.background = colorOf(m.nick);
+
+    const body = el2('div', 'body');
+    const top = el2('div', 'top');
+    top.append(el2('b', null, self ? '我' : m.nick), el2('span', null, timeOf(m.ts)));
+
+    // 附件渲染
+    if (m.file && !m.recalled) body.append(buildAttach(m.file));
+
+    const bubble = el2('div', 'bubble');
+    if (m.recalled) bubble.textContent = '消息已撤回';
+    else bubble.textContent = m.text || '';
+    if (m.recalled || m.text) body.append(bubble);
+
+    const acts = el2('div', 'acts');
+    if (!m.recalled) {
+      if (self || can('chat.recall.any')) {
+        const b = el2('button', 'act', '撤回');
+        b.onclick = () => ws.send(JSON.stringify({ type: 'dm:recall', convKey, messageId: m.id }));
+        acts.append(b);
+      }
+      if (!self && can('chat.report')) {
+        const b = el2('button', 'act', '举报');
+        b.onclick = () => openReport(m, 'dm');
+        acts.append(b);
+      }
+    }
+    // 已读回执（仅自己发的消息显示）
+    if (self && !m.recalled) {
+      const rt = el2('span', 'read-tag' + (m.readAt ? ' read' : ''), m.readAt ? '已读' : '未读');
+      rt.dataset.read = m.id;
+      top.append(rt);
+    }
+
+    body.insertBefore(top, body.firstChild);
+    body.append(acts);
+    wrap.append(av, body);
+    el.feed.appendChild(wrap);
+    scrollDown();
+  }
+
+  function buildAttach(file) {
+    const isImg = (file.mime || '').startsWith('image/');
+    const box = el2('div', 'attach-card');
+    const url = `/api/files/${file.stored}`;
+
+    if (isImg) {
+      const img = document.createElement('img');
+      img.className = 'attach-img';
+      img.src = url;
+      img.alt = file.name;
+      img.onclick = () => window.open(url, '_blank');
+      box.style.padding = '6px';
+      box.appendChild(img);
+      return box;
+    }
+    const ico = el2('div', 'ico', fileIcon(file.mime));
+    const meta = el2('div', 'meta2');
+    const a = document.createElement('a');
+    a.href = url; a.target = '_blank'; a.download = file.name;
+    a.className = 'nm2'; a.textContent = file.name;
+    a.style.color = 'inherit';
+    meta.append(a, el2('div', 'sz', humanSize(file.size)));
+    box.append(ico, meta);
+    return box;
+  }
+
+  function fileIcon(mime) {
+    if ((mime || '').startsWith('image/')) return '🖼';
+    if (mime === 'application/pdf') return '📕';
+    if ((mime || '').includes('zip')) return '🗜';
+    if ((mime || '').includes('word')) return '📘';
+    if ((mime || '').includes('sheet')) return '📗';
+    return '📄';
+  }
+  function humanSize(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  function markDmRecalled(messageId, by) {
+    const w = el.feed.querySelector(`[data-id="${messageId}"]`);
+    if (!w) return;
+    w.classList.add('recalled');
+    const bubble = w.querySelector('.bubble');
+    if (bubble) bubble.textContent = `消息已被 ${by} 撤回`;
+    const acts = w.querySelector('.acts');
+    if (acts) acts.textContent = '';
+  }
+
+  function renderTyping() {
+    const names = [...dmTypingPeers.values()].map((v) => v.nick).filter(Boolean);
+    el.typing.textContent = !names.length ? ''
+      : names.length === 1 ? `${names[0]} 正在输入…`
+      : `${names.slice(0, 3).join('、')} 正在输入…`;
+  }
+
+  // 在线用户集合（用于会话列表在线点）
+  const onlinePeers = new Set();
+
+  // 发起私聊：用户选择器
+  el.newDmBtn.onclick = async () => {
+    hideBox(el.pickMsg);
+    el.pickSearch.value = '';
+    open_(el.pickUserModal);
+    await renderPickList('');
+    el.pickSearch.focus();
+  };
+  el.pickSearch.addEventListener('input', () => {
+    clearTimeout(dmSearchTimer);
+    dmSearchTimer = setTimeout(() => renderPickList(el.pickSearch.value), 250);
+  });
+
+  el.dmSearch.addEventListener('input', () => {
+    clearTimeout(dmSearchTimer);
+    dmSearchTimer = setTimeout(() => loadConvs(el.dmSearch.value), 250);
+  });
+
+  async function renderPickList(q) {
+    const r = await api('GET', '/api/users' + (q ? '?q=' + encodeURIComponent(q) : ''));
+    el.pickList.textContent = '';
+    if (r.status !== 200) return showBox(el.pickMsg, r.data?.error || '加载失败', 'err');
+    const list = r.data.users;
+    if (!list.length) {
+      el.pickList.appendChild(el2('div', 'empty', '没有匹配的用户'));
+      return;
+    }
+    list.forEach((u) => {
+      const d = el2('div', 'conv');
+      const av = el2('div', 'av', initial(u.username));
+      av.style.background = colorOf(u.username);
+      const info = el2('div', 'info');
+      const nm = el2('div', 'nm');
+      const dot = el2('span', 'online-dot' + (onlinePeers.has(u.id) ? ' on' : ''));
+      nm.append(dot, el2('span', null, u.username));
+      nm.append(el2('span', 'badge ' + u.role, ROLE_LABEL[u.role]));
+      info.append(nm);
+      if (u.blocked) info.append(el2('div', 'pv', '已在你黑名单中'));
+      d.append(av, info);
+
+      const btn = el2('button', 'act', '发起');
+      btn.onclick = (e) => {
+        e.stopPropagation();
+        if (u.blockedMe) { toast('对方已将你拉黑，无法发起私聊'); return; }
+        close_(el.pickUserModal);
+        openDm(u.id);
+      };
+      d.append(btn);
+      d.onclick = () => { close_(el.pickUserModal); openDm(u.id); };
+      el.pickList.appendChild(d);
+    });
+  }
+
+  // 会话操作菜单
+  el.peerMenuBtn.onclick = (e) => {
+    if (!peer) return;
+    e.stopPropagation();
+    document.querySelectorAll('.menu').forEach((m) => m.remove());
+    const menu = el2('div', 'menu');
+    const b1 = el2('button', null, peerBlocked ? '解除拉黑' : '拉黑此人');
+    if (peerBlocked) b1.className = '';
+    b1.onclick = async () => {
+      menu.remove();
+      const r = await api('POST', `/api/dm/${peer.id}/block`, { blocked: !peerBlocked });
+      if (r.status !== 200) return toast(r.data?.error || '操作失败');
+      peerBlocked = !peerBlocked;
+      toast(peerBlocked ? `已拉黑 ${peer.username}` : `已解除拉黑 ${peer.username}`);
+      openDm(peer.id);
+      loadBlocks(); loadConvs();
+    };
+    const b2 = el2('button', null, '查看资料');
+    b2.onclick = () => {
+      menu.remove();
+      alert(`${peer.username}\n角色：${ROLE_LABEL[peer.role]}\n状态：${peerOnline ? '在线' : '离线'}`);
+    };
+    menu.append(b2, b1);
+    document.body.appendChild(menu);
+    const rect = el.peerMenuBtn.getBoundingClientRect();
+    menu.style.top = (rect.bottom + 6) + 'px';
+    menu.style.left = Math.max(8, rect.right - menu.offsetWidth) + 'px';
+  };
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.menu').forEach((m) => m.remove());
+  });
+
+  // ---------- 文件上传 ----------
+  el.attachBtn.onclick = () => {
+    if (mode !== 'dm' || !peer) return toast('文件发送仅支持私聊');
+    el.fileInput.click();
+  };
+  el.fileInput.onchange = async () => {
+    const f = el.fileInput.files && el.fileInput.files[0];
+    if (!f) return;
+    if (f.size > 5 * 1024 * 1024) {
+      toast('文件超过 5MB 限制');
+      el.fileInput.value = '';
+      return;
+    }
+    el.uploadBar.className = 'upload-bar on';
+    el.uploadBar.textContent = `正在上传 ${f.name} …`;
+
+    try {
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': f.type || 'application/octet-stream',
+                   'X-File-Name': encodeURIComponent(f.name) },
+        body: f,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || '上传失败');
+      el.uploadBar.textContent = '上传完成，发送中…';
+      ws.send(JSON.stringify({
+        type: 'dm:message', peerId: peer.id, text: '', file: data.file,
+      }));
+      setTimeout(() => { el.uploadBar.className = 'upload-bar'; }, 1200);
+    } catch (err) {
+      el.uploadBar.textContent = '';
+      el.uploadBar.className = 'upload-bar';
+      toast('上传失败：' + err.message);
+    }
+    el.fileInput.value = '';
+  };
+
+  // ================= 举报 =================
+  let reportKind = 'room';
+  function openReport(m, kind) {
+    replyTarget = m;
+    reportKind = kind || 'room';
+    hideBox($('reportMsg'));
+    $('rpReason').value = '';
+    $('reportTitle').textContent = reportKind === 'dm' ? '举报私聊消息' : '举报消息';
+    open_(el.reportModal);
+  }
+  $('rpSubmit').onclick = async () => {
+    if (!replyTarget) return;
+    const reason = $('rpReason').value;
+
+    if (reportKind === 'dm') {
+      // 私聊举报走 WebSocket，便于服务端校验会话归属
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        return showBox($('reportMsg'), '连接已断开，请稍后重试', 'err');
+      }
+      ws.send(JSON.stringify({
+        type: 'dm:report', convKey, messageId: replyTarget.id, reason,
+      }));
+      showBox($('reportMsg'), '举报已提交，管理员会尽快处理', 'ok');
+      setTimeout(() => close_(el.reportModal), 1000);
+      return;
+    }
+
+    const r = await api('POST', '/api/reports', { roomId, messageId: replyTarget.id, reason });
+    if (r.status === 200) {
+      showBox($('reportMsg'), '举报已提交，管理员会尽快处理', 'ok');
+      setTimeout(() => close_(el.reportModal), 1000);
+    } else {
+      showBox($('reportMsg'), r.data?.error || '提交失败', 'err');
+    }
+  };
+
+  // ================= 建房间 =================
+  el.newRoomBtn.onclick = () => { hideBox($('roomMsg')); $('rName').value = ''; open_(el.roomModal); };
+  $('rCreate').onclick = async () => {
+    const r = await api('POST', '/api/rooms', { name: $('rName').value, type: $('rType').value });
+    if (r.status === 200) {
+      close_(el.roomModal);
+      await loadRooms();
+      joinRoom(r.data.room.id);
+    } else {
+      showBox($('roomMsg'), r.data?.error || '创建失败', 'err');
+    }
+  };
+
+  // ================= 弹层开关 =================
+  const open_ = (n) => n.classList.remove('hidden');
+  const close_ = (n) => n.classList.add('hidden');
+  document.querySelectorAll('[data-close]').forEach((b) =>
+    b.onclick = () => close_(b.closest('.overlay')));
+  document.querySelectorAll('.overlay').forEach((o) =>
+    o.addEventListener('click', (e) => { if (e.target === o) close_(o); }));
+
+  // ================= 管理后台 =================
+  el.adminBtn.onclick = () => { open_(el.adminModal); renderAdmin(); };
+  el.admTabs.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-tab]');
+    if (!b) return;
+    admTab = b.dataset.tab;
+    [...el.admTabs.children].forEach((x) => x.classList.toggle('on', x === b));
+    renderAdmin();
+  });
+
+  function table(headers, rows, empty) {
+    if (!rows.length) return el2('div', 'empty', empty || '暂无数据');
+    const t = el2('table');
+    const thead = el2('thead'), tr = el2('tr');
+    headers.forEach((h) => tr.appendChild(el2('th', null, h)));
+    thead.appendChild(tr); t.appendChild(thead);
+    const tb = el2('tbody');
+    rows.forEach((cells) => {
+      const r = el2('tr');
+      cells.forEach((c) => {
+        const td = el2('td');
+        if (c instanceof Node) td.appendChild(c); else td.textContent = c ?? '';
+        r.appendChild(td);
+      });
+      tb.appendChild(r);
+    });
+    t.appendChild(tb);
+    return t;
+  }
+
+  function tag(text, cls) { return el2('span', 'tag ' + cls, text); }
+
+  async function renderAdmin() {
+    el.admBody.textContent = '';
+    el.admBody.appendChild(el2('div', 'empty', '加载中…'));
+
+    if (admTab === 'users') return renderUsersTab();
+    if (admTab === 'approve') return renderApproveTab();
+    if (admTab === 'rooms') return renderRoomsTab();
+    if (admTab === 'messages') return renderMessagesTab();
+    if (admTab === 'dms') return renderDmsTab();
+    if (admTab === 'reports') return renderReportsTab();
+    if (admTab === 'audit') return renderAuditTab();
+  }
+
+  function actBtn(label, fn, danger) {
+    const b = el2('button', 'hbtn' + (danger ? ' danger' : ''), label);
+    if (danger) b.style.cssText = 'background:#ff5c5c22;border-color:#ff5c5c55;color:#ffb3b3';
+    b.onclick = fn;
+    return b;
+  }
+
+  async function renderUsersTab() {
+    const r = await api('GET', '/api/admin/users');
+    if (r.status !== 200) return showAdmErr(r.data?.error);
+    const rows = r.data.users.map((u) => {
+      const acts = el2('div', 'row-acts');
+      if (u.status === 'pending') {
+        acts.append(actBtn('通过', async () => {
+          await api('POST', `/api/admin/users/${u.id}/approve`); renderAdmin();
+        }));
+        acts.append(actBtn('拒绝', async () => {
+          if (confirm(`拒绝并删除 ${u.username} 的注册申请？`)) {
+            await api('POST', `/api/admin/users/${u.id}/reject`); renderAdmin();
+          }
+        }, true));
+      } else {
+        const sel = el2('select', 'input');
+        sel.style.cssText = 'width:auto;padding:4px 8px;font-size:12px';
+        ['user','mod','admin'].forEach((role) => {
+          const o = el2('option', null, ROLE_LABEL[role]); o.value = role;
+          if (role === u.role) o.selected = true;
+          sel.appendChild(o);
+        });
+        sel.onchange = async () => {
+          const res = await api('POST', `/api/admin/users/${u.id}/role`, { role: sel.value });
+          if (res.status !== 200) { alert(res.data?.error); renderAdmin(); }
+        };
+        acts.append(sel);
+        if (u.mute) acts.append(actBtn('解除禁言',
+          async () => { await api('POST', `/api/admin/users/${u.id}/unmute`); renderAdmin(); }));
+        else acts.append(actBtn('禁言', async () => {
+          const min = prompt('禁言时长（分钟）', '10');
+          if (min) { await api('POST', `/api/admin/users/${u.id}/mute`, { minutes: +min }); renderAdmin(); }
+        }));
+        acts.append(u.status === 'banned'
+          ? actBtn('解封', async () => {
+              await api('POST', `/api/admin/users/${u.id}/status`, { status: 'active' }); renderAdmin();
+            })
+          : actBtn('封禁', async () => {
+              if (confirm(`确定封禁 ${u.username}？其会话将立即失效。`)) {
+                await api('POST', `/api/admin/users/${u.id}/status`, { status: 'banned' }); renderAdmin();
+              }
+            }, true));
+      }
+      return [
+        u.username,
+        tag(ROLE_LABEL[u.role], u.role),
+        tag({ active: '正常', pending: '待审批', banned: '已封禁' }[u.status], u.status),
+        u.mute ? `至 ${fullTime(u.mute.until)}` : '—',
+        fullTime(u.createdAt),
+        acts,
+      ];
+    });
+    el.admBody.textContent = '';
+    el.admBody.appendChild(table(['用户名','角色','状态','禁言','注册时间','操作'], rows, '暂无用户'));
+  }
+
+  async function renderApproveTab() {
+    const r = await api('GET', '/api/admin/users');
+    const pend = (r.data?.users || []).filter((u) => u.status === 'pending');
+    el.admBody.textContent = '';
+
+    const pendingBadge = $('tabApprove');
+    pendingBadge.innerHTML = '待审批';
+    if (pend.length) {
+      const p = el2('span', 'pill', pend.length);
+      pendingBadge.appendChild(p);
+    }
+
+    const rows = pend.map((u) => {
+      const acts = el2('div', 'row-acts');
+      acts.append(actBtn('✓ 通过', async () => {
+        await api('POST', `/api/admin/users/${u.id}/approve`); renderAdmin();
+      }));
+      acts.append(actBtn('✕ 拒绝', async () => {
+        if (confirm(`拒绝并删除 ${u.username}？`)) {
+          await api('POST', `/api/admin/users/${u.id}/reject`); renderAdmin();
+        }
+      }, true));
+      return [u.username, fullTime(u.createdAt), acts];
+    });
+    el.admBody.appendChild(
+      table(['用户名','申请时间','操作'], rows, '没有待审批的注册申请'));
+  }
+
+  async function renderRoomsTab() {
+    const [rr, ur] = await Promise.all([
+      api('GET', '/api/admin/rooms'),
+      api('GET', '/api/admin/users'),
+    ]);
+    const users = (ur.data?.users || []).filter((u) => u.status === 'active');
+
+    const rows = (rr.data?.rooms || []).map((room) => {
+      const acts = el2('div', 'row-acts');
+      acts.append(actBtn('公告', async () => {
+        const text = prompt(`为「${room.name}」设置公告（留空则清除）`, room.announce || '');
+        if (text !== null) {
+          await api('POST', `/api/admin/rooms/${room.id}/announce`, { text });
+          toast('公告已更新'); renderAdmin();
+        }
+      }));
+      if (room.type === 'private') {
+        acts.append(actBtn('加成员', async () => {
+          const name = prompt('要添加的用户名');
+          const u = users.find((x) => x.username === name);
+          if (!u) return alert('未找到该用户');
+          await api('POST', `/api/admin/rooms/${room.id}/members`, { userId: u.id, member: true });
+          toast(`已将 ${name} 加入 ${room.name}`); renderAdmin();
+        }));
+      }
+      acts.append(actBtn('删除', async () => {
+        if (confirm(`删除房间「${room.name}」及其全部消息？`)) {
+          const res = await api('DELETE', `/api/admin/rooms/${room.id}`);
+          if (res.status !== 200) alert(res.data?.error);
+          renderAdmin();
+        }
+      }, true));
+      return [
+        room.name,
+        room.type === 'private' ? tag('私有', 'mod') : tag('公开', 'user'),
+        room.memberCount,
+        room.messageCount,
+        room.announce || '—',
+        acts,
+      ];
+    });
+    el.admBody.textContent = '';
+    el.admBody.appendChild(
+      table(['房间','类型','成员','消息数','公告','操作'], rows, '暂无房间'));
+  }
+
+  async function renderMessagesTab() {
+    el.admBody.textContent = '';
+
+    const doQuery = async (q, roomFilter) => {
+      [...el.admBody.querySelectorAll('table, .empty')].forEach((n) => n.remove());
+      const url = `/api/admin/messages?limit=200${q ? '&q=' + encodeURIComponent(q) : ''}` +
+                  (roomFilter ? '&roomId=' + roomFilter : '');
+      const r = await api('GET', url);
+      const rows = (r.data?.messages || []).map((m) => {
+        const acts = el2('div', 'row-acts');
+        if (m.recalled) {
+          acts.append(el2('span', null, '已撤回'));
+        } else {
+          acts.append(actBtn('撤回', async () => {
+            await api('POST', '/api/admin/messages/recall',
+              { roomId: m.roomId, messageId: m.id });
+            toast('已撤回'); doQuery(q, roomFilter);
+          }));
+          acts.append(actBtn('删除', async () => {
+            if (confirm('永久删除该消息？')) {
+              await api('DELETE', '/api/admin/messages', { roomId: m.roomId, messageId: m.id });
+              doQuery(q, roomFilter);
+            }
+          }, true));
+        }
+        return [m.roomName, m.nick, m.recalled ? '（已撤回）' : m.text, fullTime(m.ts), acts];
+      });
+      el.admBody.appendChild(
+        table(['房间','发送者','内容','时间','操作'], rows, '没有匹配的消息'));
+    };
+
+    const bar = el2('div', 'bar');
+    const input = el2('input', 'input');
+    input.placeholder = '搜索消息内容…';
+    input.style.cssText = 'max-width:300px';
+    const btn = actBtn('搜索', () => doQuery(input.value, sel.value || undefined));
+    const sel = el2('select', 'input');
+    sel.style.cssText = 'max-width:220px;width:auto';
+    sel.appendChild(el2('option', null, '全部房间'));
+    rooms.forEach((room) => {
+      const o = el2('option', null, room.name); o.value = room.id; sel.appendChild(o);
+    });
+    sel.onchange = () => doQuery(input.value, sel.value || undefined);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doQuery(input.value, sel.value || undefined);
+    });
+    bar.append(input, btn, sel);
+    el.admBody.appendChild(bar);
+
+    await doQuery('');
+  }
+
+  async function renderDmsTab() {
+    el.admBody.textContent = '';
+
+    const doQuery = async (q) => {
+      [...el.admBody.querySelectorAll('table, .empty, .bar + div')].forEach((n) => {
+        if (!n.classList.contains('bar')) n.remove();
+      });
+      const r = await api('GET', '/api/admin/dms?limit=200' +
+        (q ? '&q=' + encodeURIComponent(q) : ''));
+      const rows = (r.data?.messages || []).map((m) => {
+        const acts = el2('div', 'row-acts');
+        if (m.recalled) acts.append(el2('span', null, '已撤回'));
+        else acts.append(actBtn('撤回', async () => {
+          await api('POST', '/api/admin/dms/recall',
+            { convKey: m.convKey, messageId: m.id });
+          toast('已撤回'); doQuery(q);
+        }));
+        const content = m.recalled ? '（已撤回）'
+          : (m.file ? `[文件] ${m.file.name}` : (m.text || ''));
+        return [
+          m.members.join(' ↔ '), m.fromName, content, fullTime(m.ts), acts,
+        ];
+      });
+      const note = el2('div', null, r.data?.total != null
+        ? `命中 ${r.data.total} 条，显示前 ${rows.length} 条` : '');
+      note.style.cssText = 'font-size:12px;color:var(--muted);margin-bottom:10px';
+      el.admBody.appendChild(note);
+      el.admBody.appendChild(
+        table(['会话双方','发送者','内容','时间','操作'], rows, '没有匹配的私聊消息'));
+    };
+
+    const bar = el2('div', 'bar');
+    const input = el2('input', 'input');
+    input.placeholder = '搜索私聊内容或用户名…';
+    input.style.cssText = 'max-width:340px';
+    const btn = actBtn('搜索', () => doQuery(input.value));
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doQuery(input.value); });
+    bar.append(input, btn);
+    el.admBody.appendChild(bar);
+
+    await doQuery('');
+  }
+
+  async function renderReportsTab() {
+    const r = await api('GET', '/api/admin/reports');
+    const reports = r.data?.reports || [];
+    const open = reports.filter((x) => x.status === 'open').length;
+    const tb = $('tabReports');
+    tb.innerHTML = '举报处理';
+    if (open) tb.appendChild(el2('span', 'pill', open));
+
+    const rows = reports.map((x) => {
+      const acts = el2('div', 'row-acts');
+      if (x.status === 'open') {
+        acts.append(actBtn('已处理', async () => {
+          await api('POST', `/api/admin/reports/${x.id}`, { status: 'resolved' }); renderAdmin();
+        }));
+        acts.append(actBtn('驳回', async () => {
+          await api('POST', `/api/admin/reports/${x.id}`, { status: 'dismissed' }); renderAdmin();
+        }, true));
+      } else {
+        acts.append(el2('span', null, `${x.handledBy || ''}`));
+      }
+      return [
+        x.reporterName,
+        x.kind === 'dm' ? tag('私聊 ' + (x.convMembers || []).join('↔'), 'mod') : (x.roomName || '—'),
+        x.message ? (x.message.recalled ? '（已撤回）'
+          : (x.message.file ? `[文件] ${x.message.file.name}` : x.message.text)) : '（已删除）',
+        x.reason || '—',
+        tag({ open: '待处理', resolved: '已处理', dismissed: '已驳回' }[x.status], x.status),
+        fullTime(x.createdAt),
+        acts,
+      ];
+    });
+    el.admBody.textContent = '';
+    el.admBody.appendChild(
+      table(['举报人','来源','被举报内容','原因','状态','时间','操作'], rows, '暂无举报'));
+  }
+
+  async function renderAuditTab() {
+    const r = await api('GET', '/api/admin/audit?limit=300');
+    const ACTIONS = {
+      'user.login':'登录','user.logout':'登出','user.register':'注册',
+      'user.register.first-admin':'注册（首个管理员）','user.approve':'审批通过',
+      'user.reject':'拒绝申请','user.role':'变更角色','user.status':'变更状态',
+      'user.mute':'禁言','user.unmute':'解除禁言','message.recall':'撤回消息',
+      'message.delete':'删除消息','room.create':'创建房间','room.delete':'删除房间',
+      'room.announce':'修改公告','room.member.add':'添加成员','room.member.remove':'移除成员',
+      'report.create':'提交举报','report.handle':'处理举报',
+    };
+    const rows = (r.data?.logs || []).map((l) => [
+      fullTime(l.ts), l.actorName, ACTIONS[l.action] || l.action, l.target || '—', l.detail || '—',
+    ]);
+    el.admBody.textContent = '';
+    el.admBody.appendChild(
+      table(['时间','操作者','操作','对象','详情'], rows, '暂无审计记录'));
+  }
+
+  function showAdmErr(msg) {
+    el.admBody.textContent = '';
+    el.admBody.appendChild(el2('div', 'empty', msg || '加载失败'));
+  }
+
+  // ================= 启动 =================
+  api('GET', '/api/me').then((r) => {
+    if (r.status === 200) { me = r.data.user; perms = r.data.permissions; enterApp(); }
+    else setAuthMode(false);
+  });
+
+  // 房间列表轮询（在线人数变化）
+  setInterval(() => { if (me) api('GET', '/api/rooms').then((r) => {
+    if (r.status === 200) { rooms = r.data.rooms; renderRooms(); }
+  }); }, 8000);
+})();
+</script>
+</body>
+</html>

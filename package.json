@@ -1,0 +1,25 @@
+{
+  "name": "chat-app",
+  "version": "1.0.0",
+  "description": "带账号体系、权限控制与私聊的实时网页聊天室",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test-auth.js",
+    "test:dm": "node test-dm.js",
+    "test:ui": "node test-ui.js",
+    "test:dm-ui": "node test-dm-ui.js",
+    "verify": "node verify.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.2.1",
+    "ws": "^8.21.3"
+  }
+}
