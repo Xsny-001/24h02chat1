@@ -4,6 +4,8 @@
 -- ============================================================
 
 -- 覆盖 recall_message：mod+ 或消息作者本人可撤回
+-- 注意：撤回只置 recalled=true 标记，不清空 text，
+-- 这样普通用户在前端看到“已撤回”，但管理员（mod+）在后台仍可看到原文用于审核。
 create or replace function public.recall_message(rid uuid, mid uuid)
 returns void language plpgsql security definer set search_path = public as $$
 begin
@@ -13,7 +15,7 @@ begin
     raise exception 'no_permission';
   end if;
   update public.messages set recalled = true,
-    recalled_by = (select username from public.users where id = auth.uid()), text = ''
+    recalled_by = (select username from public.users where id = auth.uid())
     where id = mid and room_id = rid;
   perform public.log_audit('message.recall', (select name from public.rooms where id = rid), mid::text);
 end;
