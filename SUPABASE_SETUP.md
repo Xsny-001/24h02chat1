@@ -15,14 +15,17 @@
 
 ## 二、执行 SQL 迁移（顺序不可打乱）
 1. 打开 Supabase 控制台 → **SQL Editor → New query**
-2. **推荐（一次搞定）**：打开仓库里的 `supabase/00_all_in_one.sql`，整段复制，在 SQL Editor 粘贴后点 **Run** 一次即可（已按 schema→triggers→policies→rpc→rpc_patch 顺序合并好）。
-3. 若想分步执行，也可依次粘贴以下 5 个文件：
+2. **推荐（一次搞定）**：打开仓库里的 `supabase/00_all_in_one.sql`，整段复制，在 SQL Editor 粘贴后点 **Run** 一次即可（已按 schema→triggers→policies→rpc→rpc_patch→06 顺序合并好，可重复执行，幂等）。
+3. 若想分步执行，也可依次粘贴以下 6 个文件：
    1. `supabase/schema.sql`
    2. `supabase/triggers.sql`
    3. `supabase/policies.sql`
    4. `supabase/rpc.sql`
    5. `supabase/rpc_patch.sql`（补丁：本人撤回、私聊举报）
+   6. `supabase/06_fix_images_recall.sql`（**房间消息支持图片/附件 + 撤回保留原文**，让管理员在后台能看到被撤回内容）
 4. 全部执行无报错即完成。可到 **Table Editor** 看到 `users/rooms/messages/dms/blocks/reports/audit/mutes` 八张表。
+
+> 已上线、之前只跑过前 5 个文件的用户：**只需补跑 `supabase/06_fix_images_recall.sql` 一次**即可开启图片发送与「撤回保留原文」。
 
 ## 三、Auth 设置
 - **Authentication → Providers → Email**：关闭 **Confirm email**（否则注册后需验证邮箱才能登录）。
