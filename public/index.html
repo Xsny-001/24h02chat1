@@ -702,6 +702,7 @@
     el.feed.appendChild(d); scrollDown();
   }
   function addMessage(m){
+    if(m.id){ const ex=el.feed.querySelector(`[data-id="${m.id}"]`); if(ex) return; } // 去重（实时回显不重复渲染）
     const self=m.userId===(me&&me.id);
     const wrap=el2('div','msg'+(self?' self':'')+(m.recalled?' recalled':''));
     wrap.dataset.id=m.id;
@@ -774,12 +775,18 @@
   }
 
   // ================= 发送消息 =================
-  function sendMessage(){
+  async function sendMessage(){
     const text=el.input.value.replace(/\s+$/,'');
     if(!text||!me) return;
     if(muteUntil>Date.now()) return;
-    if(mode==='dm'){ if(peer) sendDm(text); }
-    else if(roomId){ sb.from('messages').insert({room_id:roomId,user_id:me.id,nick:me.username,text,ts:Date.now()}); }
+    if(mode==='dm'){ if(peer) await sendDm(text); }
+    else if(roomId){
+      const {data,error}=await sb.from('messages')
+        .insert({room_id:roomId,user_id:me.id,nick:me.username,text,ts:Date.now()})
+        .select().single();
+      if(error){ toast('发送失败：'+error.message); return; }
+      addMessage(normMsg(data));   // 本地立即渲染，不依赖实时回显
+    }
     el.input.value=''; el.input.style.height='auto';
   }
   const autoGrow=()=>{ el.input.style.height='auto'; el.input.style.height=Math.min(el.input.scrollHeight,150)+'px'; };
@@ -906,6 +913,7 @@
     el.dmPeerState.style.color=peerOnline?'var(--ok)':'var(--muted)';
   }
   function addDmMessage(m){
+    if(m.id){ const ex=el.feed.querySelector(`[data-id="${m.id}"]`); if(ex) return; } // 去重
     const self=m.fromId===(me&&me.id);
     const wrap=el2('div','msg'+(self?' self':'')+(m.recalled?' recalled':''));
     wrap.dataset.id=m.id;
@@ -967,6 +975,7 @@
     const rec={conv_key:convKey,from_id:me.id,to_id:peer.id,nick:me.username,text,ts:Date.now()};
     const {data,error}=await sb.from('dms').insert(rec).select().single();
     if(error){ toast('发送失败'); return; }
+    addDmMessage(normDm(data));   // 发送方本地立即渲染
     dmChTo(peer.id).send({type:'broadcast',event:'message',payload:normDm(data)});
   }
   function onDmMessage(m){
