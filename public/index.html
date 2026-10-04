@@ -454,6 +454,8 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="/supabase-config.js"></script>
 <script>
 (() => {
   'use strict';
@@ -471,7 +473,6 @@
     announce: $('announce'), muteBar: $('muteBar'),
     adminModal: $('adminModal'), admBody: $('admBody'), admTabs: $('admTabs'),
     roomModal: $('roomModal'), reportModal: $('reportModal'),
-    // 私聊相关
     tabRooms: $('tabRooms'), tabDms: $('tabDms'), paneRooms: $('paneRooms'),
     paneDms: $('paneDms'), convlist: $('convlist'), dmSearch: $('dmSearch'),
     dmBadge: $('dmBadge'), newDmBtn: $('newDmBtn'), blocklist: $('blocklist'),
@@ -482,1246 +483,756 @@
     pickList: $('pickList'), pickMsg: $('pickMsg'),
   };
 
-  let me = null, perms = [], ws = null;
-  let rooms = [], roomId = null, muteUntil = 0;
-  let typingTimer = null, lastTypingSent = 0;
-  const typingPeers = new Map();
-  let replyTarget = null;   // 当前要举报的消息
-  let admTab = 'users';
+  // ---------- Supabase 客户端 ----------
+  const sb = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
 
-  // 私聊状态
-  let mode = 'room';            // 'room' | 'dm'
-  let convs = [];               // 会话列表
-  let convKey = null;           // 当前打开的会话 key
-  let peer = null;              // 当前会话对方
-  let peerOnline = false;
-  let peerBlocked = false;      // 我拉黑了对方
-  let peerBlockedMe = false;    // 对方拉黑了我
-  let blocks = [];              // 我的黑名单
-  let unreadTotal = 0;
-  let dmTypingTimer = null;
-  const dmTypingPeers = new Map();
-  let dmSearchTimer = null;
+  // ---------- 权限模型（与前后端一致）----------
+  const PERMISSIONS = {
+    'chat.send':'user','chat.report':'user','dm.send':'user','dm.block':'user',
+    'room.create':'mod','chat.delete.any':'mod','chat.recall.any':'mod','user.mute':'mod',
+    'chat.announce':'mod','report.handle':'mod','user.manage':'admin','user.approve':'admin',
+    'room.manage':'admin','audit.view':'admin','dm.view':'admin'
+  };
+  const ROLE_LEVEL = { user:1, mod:2, admin:3 };
+  const rolePerms = (role) => Object.entries(PERMISSIONS)
+    .filter(([p,r]) => (ROLE_LEVEL[role]||0) >= ROLE_LEVEL[r]).map(([p])=>p);
+  let me = null, perms = [];
+  const can = (p) => perms.includes(p);
 
-  // ---------- 工具 ----------
+  // ---------- 常量/工具 ----------
   const PALETTE = ['#4f8cff','#3ddc97','#ff9f43','#ff6b9d','#a78bfa','#22d3ee','#f7b731','#ff5c5c'];
   const colorOf = (n) => { let h=0; for (let i=0;i<n.length;i++) h=(h*31+n.charCodeAt(i))>>>0; return PALETTE[h%PALETTE.length]; };
   const initial = (n) => (n||'?').trim().charAt(0).toUpperCase();
   const timeOf = (ts) => new Date(ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
   const fullTime = (ts) => new Date(ts).toLocaleString('zh-CN',{hour12:false});
-  const can = (p) => perms.includes(p);
-  const el2 = (tag, cls, text) => { const d = document.createElement(tag); if (cls) d.className = cls; if (text != null) d.textContent = text; return d; };
-  const ROLE_LABEL = { admin: '管理员', mod: '版主', user: '普通用户' };
+  const el2 = (tag, cls, text) => { const d=document.createElement(tag); if(cls) d.className=cls; if(text!=null) d.textContent=text; return d; };
+  const ROLE_LABEL = { admin:'管理员', mod:'版主', user:'普通用户' };
 
-  function showBox(node, text, kind) {
-    node.textContent = text;
-    node.className = 'msg-box on ' + (kind || 'info');
-  }
-  const hideBox = (node) => { node.className = 'msg-box'; };
+  function showBox(node, text, kind){ node.textContent=text; node.className='msg-box on '+(kind||'info'); }
+  const hideBox = (node) => { node.className='msg-box'; };
 
-  async function api(method, url, body) {
-    const res = await fetch(url, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    let data = null;
-    try { data = await res.json(); } catch {}
-    return { status: res.status, data };
+  // ---------- 状态 ----------
+  let rooms=[], roomId=null, muteUntil=0;
+  let typingTimer=null, lastTypingSent=0;
+  const typingPeers=new Map();
+  let replyTarget=null, admTab='users';
+  let mode='room', convs=[], convKey=null, peer=null, peerOnline=false, peerBlocked=false, peerBlockedMe=false, blocks=[], unreadTotal=0;
+  let dmTypingTimer=null; const dmTypingPeers=new Map(); let dmSearchTimer=null;
+  const onlinePeers=new Set();
+  let roomCh=null, dmCh=null, presenceUsers=[];
+
+  // 私聊发送通道：Supabase 只有在 channel 已 subscribe(join) 后广播才能送达，
+  // 因此每个对端维护一个已订阅的发送通道，并在打开会话时提前订阅。
+  const dmSendCh = new Map();
+  function dmChTo(userId){
+    if(!dmSendCh.has(userId)){
+      const ch = sb.channel('dm:'+userId);
+      dmSendCh.set(userId, ch);
+      ch.subscribe();
+    }
+    return dmSendCh.get(userId);
   }
+
+  // 字段归一化：Supabase snake_case → 前端 camelCase
+  const normMsg = (m) => ({ id:m.id, userId:m.user_id, nick:m.nick, text:m.text, ts:m.ts, recalled:m.recalled, recalledBy:m.recalled_by });
+  const normDm = (m) => ({
+    id:m.id, convKey:m.conv_key, fromId:m.from_id, toId:m.to_id, nick:m.nick, text:m.text, ts:m.ts,
+    recalled:m.recalled, recalledBy:m.recalled_by, readAt:m.read_at,
+    file: m.file_stored ? { stored:m.file_stored, name:m.file_name, size:m.file_size, mime:m.file_mime } : null
+  });
 
   // ================= 认证 =================
-  let regMode = false;
-  function setAuthMode(reg) {
-    regMode = reg;
-    el.tabLogin.classList.toggle('on', !reg);
-    el.tabReg.classList.toggle('on', reg);
-    el.pass2Field.classList.toggle('hidden', !reg);
-    el.authTitle.textContent = reg ? '注册新账号' : '登录聊天室';
-    el.authSub.textContent = reg ? '注册后需管理员审批才能登录' : '输入账号密码继续';
-    el.authSubmit.textContent = reg ? '提交注册' : '登录';
-    el.authMsg.className = 'msg-box';
-    el.aPass.setAttribute('autocomplete', reg ? 'new-password' : 'current-password');
-    el.authTip.textContent = reg
-      ? '首个注册的账号将自动成为管理员'
-      : '';
+  let regMode=false;
+  function setAuthMode(reg){
+    regMode=reg;
+    el.tabLogin.classList.toggle('on',!reg);
+    el.tabReg.classList.toggle('on',reg);
+    el.pass2Field.classList.toggle('hidden',!reg);
+    el.authTitle.textContent=reg?'注册新账号':'登录聊天室';
+    el.authSub.textContent=reg?'注册后需管理员审批才能登录':'输入账号密码继续';
+    el.authSubmit.textContent=reg?'提交注册':'登录';
+    el.authMsg.className='msg-box';
+    el.aPass.setAttribute('autocomplete',reg?'new-password':'current-password');
+    el.authTip.textContent=reg?'首个注册的账号将自动成为管理员':'';
   }
-  el.tabLogin.onclick = () => setAuthMode(false);
-  el.tabReg.onclick = () => setAuthMode(true);
+  el.tabLogin.onclick=()=>setAuthMode(false);
+  el.tabReg.onclick=()=>setAuthMode(true);
+  el.authSubmit.onclick=doAuth;
+  [el.aUser,el.aPass,el.aPass2].forEach((n)=>n.addEventListener('keydown',(e)=>{ if(e.key==='Enter') doAuth(); }));
 
-  el.authSubmit.onclick = doAuth;
-  [el.aUser, el.aPass, el.aPass2].forEach((n) =>
-    n.addEventListener('keydown', (e) => { if (e.key === 'Enter') doAuth(); }));
-
-  async function doAuth() {
-    const username = el.aUser.value.trim();
-    const password = el.aPass.value;
-    if (!username || !password) return showBox(el.authMsg, '请填写用户名和密码', 'err');
-
-    if (regMode) {
-      if (password !== el.aPass2.value) return showBox(el.authMsg, '两次输入的密码不一致', 'err');
-      el.authSubmit.disabled = true;
-      const r = await api('POST', '/api/register', { username, password });
-      el.authSubmit.disabled = false;
-      if (r.status !== 200) return showBox(el.authMsg, r.data?.error || '注册失败', 'err');
-      if (r.data.pending) {
-        showBox(el.authMsg, '注册成功！请等待管理员审批后再登录。', 'ok');
-        el.aPass.value = el.aPass2.value = '';
-        setTimeout(() => setAuthMode(false), 1800);
-      } else {
-        // 首个用户：直接登录
-        await boot();
-      }
+  async function doAuth(){
+    const username=el.aUser.value.trim(); const password=el.aPass.value;
+    if(!username||!password) return showBox(el.authMsg,'请填写用户名和密码','err');
+    const email=username+'@local.chat';
+    if(regMode){
+      if(password!==el.aPass2.value) return showBox(el.authMsg,'两次输入的密码不一致','err');
+      el.authSubmit.disabled=true;
+      const {error}=await sb.auth.signUp({email,password,options:{data:{username}}});
+      el.authSubmit.disabled=false;
+      if(error) return showBox(el.authMsg,'注册失败：'+error.message,'err');
+      await boot();
     } else {
-      el.authSubmit.disabled = true;
-      const r = await api('POST', '/api/login', { username, password });
-      el.authSubmit.disabled = false;
-      if (r.status !== 200) return showBox(el.authMsg, r.data?.error || '登录失败', 'err');
+      el.authSubmit.disabled=true;
+      const {error}=await sb.auth.signInWithPassword({email,password});
+      el.authSubmit.disabled=false;
+      if(error) return showBox(el.authMsg,'登录失败：'+error.message,'err');
       await boot();
     }
   }
 
-  async function boot() {
-    const r = await api('GET', '/api/me');
-    if (r.status !== 200) return;
-    me = r.data.user;
-    perms = r.data.permissions;
+  async function boot(){
+    const {data:{session}}=await sb.auth.getSession();
+    if(!session) return;
+    const {data:{user}}=await sb.auth.getUser();
+    if(!user) return;
+    const {data:u,error}=await sb.from('users').select('*').eq('id',user.id).single();
+    if(error||!u) return;
+    if(u.status==='pending'){ showBox(el.authMsg,'账号待管理员审批，通过后即可登录','err'); await sb.auth.signOut(); setAuthMode(false); return; }
+    if(u.status==='banned'){ showBox(el.authMsg,'账号已被封禁','err'); await sb.auth.signOut(); setAuthMode(false); return; }
+    me=u; perms=rolePerms(u.role); muteUntil=me.muted_until||0;
     enterApp();
   }
 
-  function enterApp() {
-    el.auth.classList.add('hidden');
-    el.app.classList.add('on');
-    el.myName.textContent = me.username;
-    el.myRole.textContent = ROLE_LABEL[me.role];
-    el.myRole.className = 'badge ' + me.role;
-    el.myAv.style.background = colorOf(me.username);
-    el.myAv.textContent = initial(me.username);
-    el.adminBtn.style.display = can('user.manage') || can('chat.delete.any') ||
-      can('report.handle') || can('dm.view') ? 'block' : 'none';
-    el.newRoomBtn.style.display = can('room.create') ? 'inline' : 'none';
-    if (!can('dm.send')) el.tabDms.style.display = 'none';
+  function enterApp(){
+    el.auth.classList.add('hidden'); el.app.classList.add('on');
+    el.myName.textContent=me.username; el.myRole.textContent=ROLE_LABEL[me.role]; el.myRole.className='badge '+me.role;
+    el.myAv.style.background=colorOf(me.username); el.myAv.textContent=initial(me.username);
+    el.adminBtn.style.display=can('user.manage')||can('chat.delete.any')||can('report.handle')||can('dm.view')?'block':'none';
+    el.newRoomBtn.style.display=can('room.create')?'inline':'none';
+    if(!can('dm.send')) el.tabDms.style.display='none';
+    setupRealtime();
     loadRooms();
     loadBlocks();
-    connect();
+    loadConvs();
+    refreshUnread();
   }
 
-  el.logoutBtn.onclick = async () => {
-    await api('POST', '/api/logout');
-    location.reload();
-  };
+  el.logoutBtn.onclick=async()=>{ await sb.auth.signOut(); location.reload(); };
 
   // ================= 房间列表 =================
-  async function loadRooms() {
-    const r = await api('GET', '/api/rooms');
-    if (r.status !== 200) return;
-    rooms = r.data.rooms;
+  async function loadRooms(){
+    const {data,error}=await sb.from('rooms').select('*');
+    if(error) return;
+    rooms=data||[];
+    // 首次安装且当前用户有建房间权限时，自动播种一个「大厅」公共房间
+    if(rooms.length===0 && can('room.create')){
+      const {error:e2}=await sb.rpc('add_room',{name:'大厅', type:'public'});
+      if(!e2) return loadRooms();
+    }
     renderRooms();
-    if (!roomId && rooms.length) joinRoom(rooms[0].id);
+    if(!roomId && rooms.length) joinRoom(rooms[0].id);
   }
-
-  function renderRooms() {
-    el.roomlist.textContent = '';
-    rooms.forEach((room) => {
-      const d = el2('div', 'room' + (room.id === roomId ? ' on' : ''));
-      const left = el2('span');
+  function renderRooms(){
+    el.roomlist.textContent='';
+    rooms.forEach((room)=>{
+      const d=el2('div','room'+(room.id===roomId?' on':''));
+      const left=el2('span');
       left.append(document.createTextNode(room.name));
-      if (room.type === 'private') left.append(el2('span', 'lock', ' 🔒'));
-      const cnt = el2('span', 'cnt', room.online ?? '');
-      d.append(left, cnt);
-      d.onclick = () => joinRoom(room.id);
+      if(room.type==='private') left.append(el2('span','lock',' 🔒'));
+      const cnt=el2('span','cnt', room.id===roomId?presenceUsers.length:'');
+      d.append(left,cnt);
+      d.onclick=()=>joinRoom(room.id);
       el.roomlist.appendChild(d);
     });
   }
 
-  function joinRoom(id) {
-    if (id === roomId) return;
-    roomId = id;
-    const room = rooms.find((x) => x.id === id);
-    el.roomTitle.textContent = room ? room.name : '—';
-    typingPeers.clear(); paintTyping();
-    renderRooms();
-    // 若 socket 尚未就绪，onopen 会补发 join
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'join', roomId: id }));
-    }
-  }
-
-  // ================= WebSocket =================
-  function connect() {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${proto}//${location.host}/ws`);
-
-    ws.onopen = () => {
-      setStatus(true);
-      if (roomId) ws.send(JSON.stringify({ type: 'join', roomId }));
-    };
-
-    ws.onmessage = (ev) => {
-      let m; try { m = JSON.parse(ev.data); } catch { return; }
-      switch (m.type) {
-        case 'hello':
-          me = m.user; perms = m.permissions;
-          break;
-        case 'rooms':
-          rooms = m.rooms; renderRooms();
-          break;
-        case 'init':
-          roomId = m.roomId;
-          el.roomTitle.textContent = m.roomName;
-          el.announce.textContent = m.announce ? '📢 ' + m.announce : '';
-          el.announce.classList.toggle('on', !!m.announce);
-          el.feed.textContent = '';
-          (m.history || []).forEach(addMessage);
-          renderUsers(m.users || []);
-          scrollDown(true);
-          setMute(m.mute);
-          break;
-        case 'message': addMessage(m); break;
-        case 'recalled': markRecalled(m.messageId, m.by); break;
-        case 'system': addSystem(m.text); break;
-        case 'presence': renderUsers(m.users || []); break;
-        case 'typing': if (m.nick !== me.username) setTyping(m.nick, m.active); break;
-        case 'reported': toast(m.message); break;
-        case 'report:new': toast(`收到来自 ${m.nick} 的新举报`); break;
-        case 'muted': setMute({ until: m.until }); toast('你已被管理员禁言'); break;
-        case 'unmuted': setMute(null); toast('禁言已解除，可以正常发言了'); break;
-        case 'kicked':
-          alert(m.message || '账号状态已变更，请重新登录');
-          location.reload();
-          break;
-
-        // ---------- 私聊 ----------
-        case 'dm:init': renderDmInit(m); break;
-        case 'dm:message':
-          // 记录对方在线（收到消息即代表在线）
-          if (m.fromId !== me.id) onlinePeers.add(m.fromId);
-          // 只渲染当前打开的会话，其余仅更新列表
-          if (m.convKey === convKey) {
-            addDmMessage(m);
-            // 正在看该会话，立即回执已读
-            if (m.fromId !== me.id && ws.readyState === WebSocket.OPEN && peer) {
-              ws.send(JSON.stringify({ type: 'dm:open', peerId: peer.id }));
-            }
-          } else if (m.fromId !== me.id) {
-            toast(`收到来自 ${m.nick} 的私聊消息`);
-          }
-          loadConvs(el.dmSearch.value);
-          break;
-        case 'dm:recalled':
-          if (m.convKey === convKey) markDmRecalled(m.messageId, m.by);
-          loadConvs(el.dmSearch.value);
-          break;
-        case 'dm:typing':
-          if (m.fromId !== me.id && m.convKey === convKey) {
-            const existing = dmTypingPeers.get(m.fromId);
-            if (existing) clearTimeout(existing.timer);
-            if (m.active) {
-              dmTypingPeers.set(m.fromId, {
-                nick: m.nick,
-                timer: setTimeout(() => {
-                  dmTypingPeers.delete(m.fromId); renderTyping();
-                }, 3000),
-              });
-            } else {
-              dmTypingPeers.delete(m.fromId);
-            }
-            renderTyping();
-          }
-          break;
-        case 'dm:read':
-          // 对方已读我的消息，更新回执标签
-          el.feed.querySelectorAll('.read-tag').forEach((t) => {
-            t.className = 'read-tag read';
-            t.textContent = '已读';
-          });
-          break;
-        case 'dm:presence':
-          if (m.online) onlinePeers.add(m.userId); else onlinePeers.delete(m.userId);
-          if (peer && peer.id === m.userId) { peerOnline = m.online; renderPeerState(); }
-          renderConvs();
-          break;
-        case 'unread': {
-          unreadTotal = m.total || 0;
-          el.dmBadge.textContent = unreadTotal > 99 ? '99+' : unreadTotal;
-          el.dmBadge.classList.toggle('on', unreadTotal > 0);
-          break;
-        }
-        case 'error':
-          if (m.message.includes('禁言')) setMute({ until: Date.now() + 60000 });
-          toast('⚠ ' + m.message);
-          break;
+  function joinRoom(id){
+    if(id===roomId) return;
+    if(roomCh){ roomCh.unsubscribe(); roomCh=null; }
+    roomId=id;
+    const room=rooms.find((x)=>x.id===id);
+    el.roomTitle.textContent=room?room.name:'—';
+    el.announce.textContent=(room&&room.announce)?room.announce:'';
+    el.announce.style.display=(room&&room.announce)?'block':'none';
+    typingPeers.clear(); paintTyping(); renderRooms();
+    if(!room) return;
+    roomCh=sb.channel('room:'+id,{config:{broadcast:{self:false},presence:{key:me.id}}});
+    roomCh.on('postgres_changes',{event:'INSERT',schema:'public',table:'messages',filter:'room_id=eq.'+id},
+      ({new:row})=>{ addMessage(normMsg(row)); });
+    roomCh.on('presence',{event:'sync'},()=>{
+      const st=roomCh.presenceState();
+      presenceUsers=Object.values(st).flat().map((p)=>p.username).filter(Boolean);
+      renderUsers(presenceUsers); renderRooms();
+    });
+    roomCh.on('presence',{event:'join'},({newPresences})=>{ newPresences.forEach((p)=>addSystem(`${p.username||'某人'} 加入了房间`)); });
+    roomCh.on('presence',{event:'leave'},({oldPresences})=>{ oldPresences.forEach((p)=>addSystem(`${p.username||'某人'} 离开了房间`)); });
+    roomCh.on('broadcast',{event:'typing'},({payload})=>{ if(payload.nick!==me.username) setTyping(payload.nick,payload.active); });
+    roomCh.subscribe(async(status)=>{
+      if(status==='SUBSCRIBED'){
+        await roomCh.track({id:me.id,username:me.username});
+        await loadRoomHistory(id);
       }
-    };
-
-    ws.onclose = () => { setStatus(false); setTimeout(connect, 2000); };
-    ws.onerror = () => setStatus(false);
+    });
   }
 
-  function setStatus(on) {
-    el.dot.className = 'dot' + (on ? '' : ' off');
-    el.connState.textContent = on ? '已连接' : '已断开';
+  async function loadRoomHistory(id){
+    el.feed.textContent='';
+    const {data}=await sb.from('messages').select('*').eq('room_id',id).order('ts').limit(200);
+    (data||[]).map(normMsg).forEach(addMessage);
+    scrollDown(true);
+  }
+
+  // ================= Realtime 初始化 =================
+  async function setupRealtime(){
+    const {data:{session}}=await sb.auth.getSession();
+    if(session) sb.realtime.setAuth(session.access_token);
+    // 私聊频道：接收发给我的广播
+    dmCh=sb.channel('dm:'+me.id,{config:{broadcast:{self:false}}});
+    dmCh.on('broadcast',{event:'message'},({payload})=>onDmMessage(payload));
+    dmCh.on('broadcast',{event:'typing'},({payload})=>onDmTyping(payload));
+    dmCh.on('broadcast',{event:'recalled'},({payload})=>{ if(payload.convKey===convKey) markDmRecalled(payload.messageId,payload.by); loadConvs(); });
+    dmCh.on('broadcast',{event:'read'},()=>{ el.feed.querySelectorAll('.read-tag').forEach((t)=>{ t.className='read-tag read'; t.textContent='已读'; }); });
+    dmCh.subscribe();
+    sb.auth.onAuthStateChange((_e,s)=>{ if(s) sb.realtime.setAuth(s.access_token); });
+  }
+
+  function setStatus(on){
+    el.dot.className='dot'+(on?'':' off');
+    el.connState.textContent=on?'已连接':'已断开';
     updateSendState();
-  }
-
-  function setMute(mute) {
-    muteUntil = mute ? mute.until : 0;
-    if (muteUntil > Date.now()) {
-      const mins = Math.ceil((muteUntil - Date.now()) / 60000);
-      el.muteBar.textContent = `你已被禁言，剩余约 ${mins} 分钟，暂时无法发言`;
-      el.muteBar.classList.add('on');
-    } else {
-      el.muteBar.classList.remove('on');
-    }
-    updateSendState();
-  }
-
-  function updateSendState() {
-    const live = ws && ws.readyState === WebSocket.OPEN;
-    const muted = muteUntil > Date.now();
-    const blocked = mode === 'dm' && (peerBlocked || peerBlockedMe);
-    el.send.disabled = !live || muted || blocked;
-    el.input.disabled = muted || blocked;
-    if (el.attachBtn) el.attachBtn.disabled = !live || muted || blocked;
-    el.input.placeholder = muted ? '你已被禁言…'
-      : blocked ? '无法发送消息'
-      : mode === 'dm' ? `发消息给 ${peer ? peer.username : ''}…`
-      : '输入消息…';
   }
 
   // ================= 消息渲染 =================
-  const nearBottom = () =>
-    el.feed.scrollHeight - el.feed.scrollTop - el.feed.clientHeight < 120;
-  const scrollDown = (f) => { if (f || nearBottom()) el.feed.scrollTop = el.feed.scrollHeight; };
+  const nearBottom=()=>el.feed.scrollHeight-el.feed.scrollTop-el.feed.clientHeight<120;
+  const scrollDown=(f)=>{ if(f||nearBottom()) el.feed.scrollTop=el.feed.scrollHeight; };
 
-  function addSystem(text) {
-    const d = el2('div', 'sys');
-    d.appendChild(el2('span', null, text));
-    el.feed.appendChild(d);
-    scrollDown();
+  function addSystem(text){
+    const d=el2('div','sys'); d.appendChild(el2('span',null,text));
+    el.feed.appendChild(d); scrollDown();
   }
-
-  function addMessage(m) {
-    const self = m.userId === (me && me.id);
-    const wrap = el2('div', 'msg' + (self ? ' self' : '') + (m.recalled ? ' recalled' : ''));
-    wrap.dataset.id = m.id;
-
-    const av = el2('div', 'av', initial(m.nick));
-    av.style.background = colorOf(m.nick);
-
-    const body = el2('div', 'body');
-    const top = el2('div', 'top');
-    top.append(el2('b', null, self ? '我' : m.nick), el2('span', null, timeOf(m.ts)));
-
-    const bubble = el2('div', 'bubble');
-    bubble.textContent = m.recalled ? '消息已撤回' : m.text;
-
-    const acts = el2('div', 'acts');
-    if (!m.recalled) {
-      // 撤回：自己的消息任何人可撤；他人消息需要 chat.recall.any
-      if (self || can('chat.recall.any')) {
-        const b = el2('button', 'act', '撤回');
-        b.onclick = () => ws.send(JSON.stringify({ type: 'recall', messageId: m.id }));
+  function addMessage(m){
+    const self=m.userId===(me&&me.id);
+    const wrap=el2('div','msg'+(self?' self':'')+(m.recalled?' recalled':''));
+    wrap.dataset.id=m.id;
+    const av=el2('div','av',initial(m.nick)); av.style.background=colorOf(m.nick);
+    const body=el2('div','body');
+    const top=el2('div','top');
+    top.append(el2('b',null,self?'我':m.nick),el2('span',null,timeOf(m.ts)));
+    const bubble=el2('div','bubble');
+    bubble.textContent=m.recalled?'消息已撤回':m.text;
+    const acts=el2('div','acts');
+    if(!m.recalled){
+      if(self||can('chat.recall.any')){
+        const b=el2('button','act','撤回');
+        b.onclick=()=>recallRoomMessage(m.id);
         acts.append(b);
       }
-      if (!self && can('chat.report')) {
-        const b = el2('button', 'act', '举报');
-        b.onclick = () => openReport(m);
-        acts.append(b);
+      if(!self&&can('chat.report')){
+        const b=el2('button','act','举报');
+        b.onclick=()=>openReport(m); acts.append(b);
       }
-      if (!self && can('chat.delete.any')) {
-        const b = el2('button', 'act del', '删除');
-        b.onclick = async () => {
-          if (!confirm('确定永久删除这条消息？')) return;
-          await api('DELETE', '/api/admin/messages', { roomId, messageId: m.id });
-          wrap.remove();
-        };
+      if(!self&&can('chat.delete.any')){
+        const b=el2('button','act del','删除');
+        b.onclick=async()=>{ if(!confirm('确定永久删除这条消息？')) return;
+          await sb.rpc('delete_message',{rid:roomId,mid:m.id}); wrap.remove(); };
         acts.append(b);
       }
     }
-
-    body.append(top, bubble, acts);
-    wrap.append(av, body);
-    el.feed.appendChild(wrap);
-    scrollDown();
+    body.append(top,bubble,acts);
+    wrap.append(av,body);
+    el.feed.appendChild(wrap); scrollDown();
   }
-
-  function markRecalled(messageId, by) {
-    const wrap = el.feed.querySelector(`[data-id="${messageId}"]`);
-    if (!wrap) return;
+  function recallRoomMessage(mid){
+    sb.rpc('recall_message',{rid:roomId,mid}).then(()=>markRecalled(mid,'你'));
+  }
+  function markRecalled(messageId,by){
+    const wrap=el.feed.querySelector(`[data-id="${messageId}"]`);
+    if(!wrap) return;
     wrap.classList.add('recalled');
-    wrap.querySelector('.bubble').textContent = `消息已被 ${by} 撤回`;
-    const acts = wrap.querySelector('.acts');
-    if (acts) acts.textContent = '';
+    wrap.querySelector('.bubble').textContent=`消息已被 ${by} 撤回`;
+    const acts=wrap.querySelector('.acts'); if(acts) acts.textContent='';
   }
-
-  function renderUsers(users) {
-    el.userlist.textContent = '';
-    el.onlineCnt.textContent = users.length;
-    users.forEach((u) => {
-      const d = el2('div', 'user');
-      const av = el2('div', 'av', initial(u)); av.style.background = colorOf(u);
-      d.append(av, el2('span', null, u));
-      if (me && u === me.username) d.append(el2('span', 'me-tag', '我'));
+  function renderUsers(users){
+    el.userlist.textContent='';
+    el.onlineCnt.textContent=users.length;
+    users.forEach((u)=>{
+      const d=el2('div','user');
+      const av=el2('div','av',initial(u)); av.style.background=colorOf(u);
+      d.append(av,el2('span',null,u));
+      if(me&&u===me.username) d.append(el2('span','me-tag','我'));
       el.userlist.appendChild(d);
     });
   }
-
-  function setTyping(nick, active) {
-    if (typingPeers.has(nick)) clearTimeout(typingPeers.get(nick));
-    if (active) typingPeers.set(nick, setTimeout(() => { typingPeers.delete(nick); paintTyping(); }, 3000));
+  function setTyping(nick,active){
+    if(typingPeers.has(nick)) clearTimeout(typingPeers.get(nick));
+    if(active) typingPeers.set(nick,setTimeout(()=>{ typingPeers.delete(nick); paintTyping(); },3000));
     else typingPeers.delete(nick);
     paintTyping();
   }
-  function paintTyping() {
-    const names = [...typingPeers.keys()];
-    el.typing.textContent = !names.length ? ''
-      : names.length === 1 ? `${names[0]} 正在输入…`
-      : `${names.slice(0,3).join('、')} 正在输入…`;
+  function paintTyping(){
+    const names=[...typingPeers.keys()];
+    el.typing.textContent=!names.length?'':names.length===1?`${names[0]} 正在输入…`:`${names.slice(0,3).join('、')} 正在输入…`;
   }
-
-  let toastTimer = null;
-  function toast(text) {
-    let t = $('toast');
-    if (!t) {
-      t = el2('div', null, '');
-      t.id = 'toast';
-      t.style.cssText = 'position:fixed;bottom:28px;left:50%;transform:translateX(-50%);' +
-        'background:#232833;border:1px solid #272c37;padding:10px 20px;border-radius:10px;' +
-        'font-size:13px;z-index:200;box-shadow:0 10px 30px #0008';
-      document.body.appendChild(t);
-    }
-    t.textContent = text;
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => t.remove(), 3000);
+  let toastTimer=null;
+  function toast(text){
+    let t=$('toast');
+    if(!t){ t=el2('div',null,''); t.id='toast';
+      t.style.cssText='position:fixed;bottom:28px;left:50%;transform:translateX(-50%);background:#232833;border:1px solid #272c37;padding:10px 20px;border-radius:10px;font-size:13px;z-index:200;box-shadow:0 10px 30px #0008';
+      document.body.appendChild(t); }
+    t.textContent=text; clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.remove(),3000);
   }
 
   // ================= 发送消息 =================
-  function sendMessage() {
-    const text = el.input.value.replace(/\s+$/, '');
-    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-    if (muteUntil > Date.now()) return;
-
-    if (mode === 'dm') {
-      if (!peer) return;
-      if (peerBlocked || peerBlockedMe) { toast('无法发送：你们之间存在拉黑关系'); return; }
-      ws.send(JSON.stringify({ type: 'dm:message', peerId: peer.id, text }));
-      ws.send(JSON.stringify({ type: 'dm:typing', peerId: peer.id, active: false }));
-    } else {
-      ws.send(JSON.stringify({ type: 'message', text }));
-      ws.send(JSON.stringify({ type: 'typing', active: false }));
-    }
-    el.input.value = '';
-    el.input.style.height = 'auto';
+  function sendMessage(){
+    const text=el.input.value.replace(/\s+$/,'');
+    if(!text||!me) return;
+    if(muteUntil>Date.now()) return;
+    if(mode==='dm'){ if(peer) sendDm(text); }
+    else if(roomId){ sb.from('messages').insert({room_id:roomId,user_id:me.id,nick:me.username,text,ts:Date.now()}); }
+    el.input.value=''; el.input.style.height='auto';
   }
-  const autoGrow = () => {
-    el.input.style.height = 'auto';
-    el.input.style.height = Math.min(el.input.scrollHeight, 150) + 'px';
-  };
-  el.send.onclick = sendMessage;
-  el.input.addEventListener('input', () => {
+  const autoGrow=()=>{ el.input.style.height='auto'; el.input.style.height=Math.min(el.input.scrollHeight,150)+'px'; };
+  el.send.onclick=sendMessage;
+  el.input.addEventListener('input',()=>{
     autoGrow();
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const now = Date.now();
-    if (mode === 'dm') {
-      if (!peer) return;
-      if (now - lastTypingSent > 1200) {
-        ws.send(JSON.stringify({ type: 'dm:typing', peerId: peer.id, active: true }));
-        lastTypingSent = now;
-      }
+    if(!me) return;
+    const now=Date.now();
+    if(mode==='dm'){
+      if(!peer) return;
+      if(now-lastTypingSent>1200){ dmChTo(peer.id).send({type:'broadcast',event:'typing',payload:{fromId:me.id,convKey,nick:me.username,active:true}}); lastTypingSent=now; }
       clearTimeout(dmTypingTimer);
-      dmTypingTimer = setTimeout(
-        () => ws.send(JSON.stringify({ type: 'dm:typing', peerId: peer.id, active: false })), 1500);
-    } else {
-      if (now - lastTypingSent > 1200) {
-        ws.send(JSON.stringify({ type: 'typing', active: true }));
-        lastTypingSent = now;
-      }
+      dmTypingTimer=setTimeout(()=>{ dmChTo(peer.id).send({type:'broadcast',event:'typing',payload:{fromId:me.id,convKey,nick:me.username,active:false}}); },1500);
+    } else if(roomId&&roomCh){
+      if(now-lastTypingSent>1200){ roomCh.send({type:'broadcast',event:'typing',payload:{nick:me.username,active:true}}); lastTypingSent=now; }
       clearTimeout(typingTimer);
-      typingTimer = setTimeout(() => ws.send(JSON.stringify({ type: 'typing', active: false })), 1500);
+      typingTimer=setTimeout(()=>{ roomCh.send({type:'broadcast',event:'typing',payload:{nick:me.username,active:false}}); },1500);
     }
   });
-  el.input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); }
-  });
+  el.input.addEventListener('keydown',(e)=>{ if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){ e.preventDefault(); sendMessage(); } });
+
+  function updateSendState(){
+    const live=!!me;
+    const muted=muteUntil>Date.now();
+    const blocked=mode==='dm'&&(peerBlocked||peerBlockedMe);
+    if(muted){ el.muteBar.style.display='block'; el.muteBar.textContent='你已被禁言至 '+fullTime(muteUntil); }
+    else el.muteBar.style.display='none';
+    el.send.disabled=!live||muted||blocked;
+    el.input.disabled=muted||blocked;
+    if(el.attachBtn) el.attachBtn.disabled=!live||muted||blocked;
+    el.input.placeholder=muted?'你已被禁言…':blocked?'无法发送消息':mode==='dm'?`发消息给 ${peer?peer.username:''}…`:'输入消息…';
+  }
 
   // ================= 私聊 =================
-  // 侧栏 tab 切换
-  el.tabRooms.onclick = () => setMode('room');
-  el.tabDms.onclick = () => setMode('dm');
-
-  function setMode(m) {
-    mode = m;
-    el.tabRooms.classList.toggle('on', m === 'room');
-    el.tabDms.classList.toggle('on', m === 'dm');
-    el.paneRooms.classList.toggle('hidden', m !== 'room');
-    el.paneDms.classList.toggle('hidden', m !== 'dm');
-    el.dmPeerState.style.display = m === 'dm' ? 'inline' : 'none';
-    el.peerMenuBtn.style.display = m === 'dm' && peer ? 'block' : 'none';
-    el.composerHint.textContent = m === 'dm'
-      ? 'Enter 发送 · 私聊内容仅双方可见'
-      : 'Enter 发送 · Shift+Enter 换行 · 悬停消息可撤回或举报';
-
-    if (m === 'dm') {
-      el.roomTitle.textContent = peer ? peer.username : '私聊';
-      el.announce.classList.remove('on');
-      renderConvs();
-      renderBlocks();
-      loadConvs();
-      if (!peer) {
-        el.feed.textContent = '';
-        el.feed.appendChild(el2('div', 'empty', '从左侧选择一个会话，或点「+ 发起」开始新的私聊'));
-      }
+  el.tabRooms.onclick=()=>setMode('room');
+  el.tabDms.onclick=()=>setMode('dm');
+  function setMode(m){
+    mode=m;
+    el.tabRooms.classList.toggle('on',m==='room');
+    el.tabDms.classList.toggle('on',m==='dm');
+    el.paneRooms.classList.toggle('hidden',m!=='room');
+    el.paneDms.classList.toggle('hidden',m!=='dm');
+    el.dmPeerState.style.display=m==='dm'?'inline':'none';
+    el.peerMenuBtn.style.display=m==='dm'&&peer?'block':'none';
+    el.composerHint.textContent=m==='dm'?'Enter 发送 · 私聊内容仅双方可见':'Enter 发送 · Shift+Enter 换行 · 悬停消息可撤回或举报';
+    if(m==='dm'){ el.roomTitle.textContent=peer?peer.username:'私聊'; renderConvs(); renderBlocks(); loadConvs();
+      if(!peer){ el.feed.textContent=''; el.feed.appendChild(el2('div','empty','从左侧选择一个会话，或点「+ 发起」开始新的私聊')); }
     } else {
-      el.roomTitle.textContent = (rooms.find((r) => r.id === roomId) || {}).name || '—';
-      dmTypingPeers.clear();
-      renderTyping();
-      if (roomId && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'join', roomId }));
-      }
+      el.roomTitle.textContent=(rooms.find((r)=>r.id===roomId)||{}).name||'—';
+      dmTypingPeers.clear(); paintTyping();
     }
     updateSendState();
   }
 
-  async function loadConvs(q) {
-    const url = '/api/dm/conversations' + (q ? '?q=' + encodeURIComponent(q) : '');
-    const r = await api('GET', url);
-    if (r.status !== 200) return;
-    convs = r.data.conversations;
-    renderConvs();
+  async function loadConvs(){
+    const {data,error}=await sb.rpc('get_conversations');
+    if(error) return;
+    convs=(data||[]).map((c)=>({convKey:c.conv_key,peerId:c.peer_id,peerName:c.peer_name,lastText:c.last_text,lastTs:c.last_ts,unread:c.unread,blocked:c.blocked,blockedMe:c.blocked_me}));
+    renderConvs(); refreshUnread();
   }
-
-  function renderConvs() {
-    el.convlist.textContent = '';
-    if (!convs.length) {
-      el.convlist.appendChild(el2('div', 'empty', '暂无会话'));
-      return;
-    }
-    convs.forEach((cv) => {
-      const d = el2('div', 'conv' + (cv.convKey === convKey ? ' on' : ''));
-      const av = el2('div', 'av', initial(cv.peerName));
-      av.style.background = colorOf(cv.peerName);
-
-      const info = el2('div', 'info');
-      const nm = el2('div', 'nm');
-      const dot = el2('span', 'online-dot' + (onlinePeers.has(cv.peerId) ? ' on' : ''));
-      nm.append(dot, el2('span', null, cv.peerName));
-      if (cv.blocked) nm.append(el2('span', 'read-tag', '已拉黑'));
-      const pv = el2('div', 'pv', cv.lastText || '');
-      info.append(nm, pv);
-
-      d.append(av, info);
-      if (cv.unread) d.append(el2('span', 'unread', cv.unread > 99 ? '99+' : cv.unread));
-
-      d.onclick = () => openDm(cv.peerId);
+  function renderConvs(){
+    el.convlist.textContent='';
+    if(!convs.length){ el.convlist.appendChild(el2('div','empty','暂无会话')); return; }
+    convs.forEach((cv)=>{
+      const d=el2('div','conv'+(cv.convKey===convKey?' on':''));
+      const av=el2('div','av',initial(cv.peerName)); av.style.background=colorOf(cv.peerName);
+      const info=el2('div','info');
+      const nm=el2('div','nm');
+      const dot=el2('span','online-dot'+(onlinePeers.has(cv.peerId)?' on':''));
+      nm.append(dot,el2('span',null,cv.peerName));
+      if(cv.blocked) nm.append(el2('span','read-tag','已拉黑'));
+      const pv=el2('div','pv',cv.lastText||'');
+      info.append(nm,pv);
+      d.append(av,info);
+      if(cv.unread) d.append(el2('span','unread',cv.unread>99?'99+':cv.unread));
+      d.onclick=()=>openDm(cv.peerId);
       el.convlist.appendChild(d);
     });
   }
-
-  function renderBlocks() {
-    el.blocklist.textContent = '';
-    if (!blocks.length) {
-      el.blocklist.appendChild(el2('div', 'empty', '无'));
-      return;
-    }
-    blocks.forEach((b) => {
-      const d = el2('div', 'conv');
-      const av = el2('div', 'av', initial(b.user.username));
-      av.style.background = colorOf(b.user.username);
-      const info = el2('div', 'info');
-      info.append(el2('div', 'nm', b.user.username));
-      const btn = el2('button', 'act', '解除');
-      btn.onclick = async (e) => {
-        e.stopPropagation();
-        await api('POST', `/api/dm/${b.user.id}/block`, { blocked: false });
-        toast('已解除拉黑');
-        loadBlocks(); loadConvs();
-        if (peer && peer.id === b.user.id) { peerBlocked = false; updateSendState(); }
-      };
-      d.append(av, info, btn);
+  function renderBlocks(){
+    el.blocklist.textContent='';
+    if(!blocks.length){ el.blocklist.appendChild(el2('div','empty','无')); return; }
+    blocks.forEach((b)=>{
+      const d=el2('div','conv');
+      const av=el2('div','av',initial(b.user.username)); av.style.background=colorOf(b.user.username);
+      const info=el2('div','info'); info.append(el2('div','nm',b.user.username));
+      const btn=el2('button','act','解除');
+      btn.onclick=async(e)=>{ e.stopPropagation(); await sb.rpc('toggle_block',{target:b.user.id,blocked:false}); toast('已解除拉黑'); loadBlocks(); loadConvs(); if(peer&&peer.id===b.user.id){ peerBlocked=false; updateSendState(); } };
+      d.append(av,info,btn);
       el.blocklist.appendChild(d);
     });
   }
-
-  async function loadBlocks() {
-    const r = await api('GET', '/api/dm/blocks/list');
-    if (r.status === 200) { blocks = r.data.blocks; renderBlocks(); }
+  async function loadBlocks(){
+    const {data}=await sb.from('blocks').select('blocked_id').eq('user_id',me.id);
+    const ids=(data||[]).map((b)=>b.blocked_id);
+    const {data:us}=ids.length?await sb.from('users').select('*').in('id',ids):{data:[]};
+    blocks=us.map((u)=>({user:u}));
+    renderBlocks();
   }
-
-  async function openDm(peerId) {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  async function openDm(peerId){
     setMode('dm');
-    // 先标记为打开中，避免重复请求
-    convKey = null;
-    ws.send(JSON.stringify({ type: 'dm:open', peerId }));
+    convKey=[me.id,peerId].sort().join(':');
+    const {data}=await sb.from('dms').select('*').eq('conv_key',convKey).order('ts').limit(200);
+    const {data:u}=await sb.from('users').select('*').eq('id',peerId).single();
+    peer=u; peerBlocked=false; peerBlockedMe=false;
+    const {data:blk}=await sb.from('blocks').select('user_id,blocked_id').or(`and(user_id.eq.${me.id},blocked_id.eq.${peerId}),and(user_id.eq.${peerId},blocked_id.eq.${me.id})`);
+    peerBlocked=blk.some((b)=>b.user_id===me.id);
+    peerBlockedMe=blk.some((b)=>b.blocked_id===me.id);
+    el.roomTitle.textContent=u.username; el.peerMenuBtn.style.display='block';
+    el.feed.textContent=''; (data||[]).map(normDm).forEach(addDmMessage);
+    if(peerBlocked) addSystem(`你已拉黑 ${u.username}，无法收发消息`);
+    else if(peerBlockedMe) addSystem(`对方已将你拉黑，消息无法送达`);
+    scrollDown(true); renderPeerState(); renderConvs(); updateSendState();
+    // 提前订阅「发给对方」的通道，保证后续广播可达
+    dmChTo(peer.id);
+    await sb.rpc('mark_read',{conv:convKey});
+    // 通知对方「我已读」，更新其已读回执
+    dmChTo(peer.id).send({type:'broadcast',event:'read'});
+    refreshUnread(); loadConvs();
   }
-
-  function renderDmInit(m) {
-    convKey = m.convKey;
-    peer = m.peer;
-    peerOnline = !!m.online;
-    peerBlocked = !!m.blocked;
-    peerBlockedMe = !!m.blockedMe;
-
-    el.roomTitle.textContent = peer.username;
-    el.peerMenuBtn.style.display = 'block';
-    el.feed.textContent = '';
-    (m.history || []).forEach(addDmMessage);
-
-    if (peerBlocked) {
-      el.feed.appendChild(el2('div', 'sys', '')).appendChild(
-        el2('span', null, `你已拉黑 ${peer.username}，无法收发消息`));
-    } else if (peerBlockedMe) {
-      el.feed.appendChild(el2('div', 'sys', '')).appendChild(
-        el2('span', null, '对方已将你拉黑，消息无法送达'));
+  function renderPeerState(){
+    if(mode!=='dm'||!peer) return;
+    el.dmPeerState.textContent=peerOnline?'● 在线':'○ 离线';
+    el.dmPeerState.style.color=peerOnline?'var(--ok)':'var(--muted)';
+  }
+  function addDmMessage(m){
+    const self=m.fromId===(me&&me.id);
+    const wrap=el2('div','msg'+(self?' self':'')+(m.recalled?' recalled':''));
+    wrap.dataset.id=m.id;
+    const av=el2('div','av',initial(m.nick)); av.style.background=colorOf(m.nick);
+    const body=el2('div','body');
+    const top=el2('div','top');
+    top.append(el2('b',null,self?'我':m.nick),el2('span',null,timeOf(m.ts)));
+    if(m.file&&!m.recalled) body.append(buildAttach(m.file));
+    const bubble=el2('div','bubble');
+    if(m.recalled) bubble.textContent='消息已撤回';
+    else bubble.textContent=m.text||'';
+    if(m.recalled||m.text) body.append(bubble);
+    const acts=el2('div','acts');
+    if(!m.recalled){
+      if(self||can('chat.recall.any')){ const b=el2('button','act','撤回'); b.onclick=()=>sb.rpc('recall_dm',{conv:convKey,mid:m.id}).then(()=>{ markDmRecalled(m.id,'你'); loadConvs(); }); acts.append(b); }
+      if(!self&&can('chat.report')){ const b=el2('button','act','举报'); b.onclick=()=>openReport(m,'dm'); acts.append(b); }
     }
-    scrollDown(true);
-    renderPeerState();
-    renderConvs();
-    updateSendState();
-  }
-
-  function renderPeerState() {
-    if (mode !== 'dm' || !peer) return;
-    el.dmPeerState.textContent = peerOnline ? '● 在线' : '○ 离线';
-    el.dmPeerState.style.color = peerOnline ? 'var(--ok)' : 'var(--muted)';
-  }
-
-  function addDmMessage(m) {
-    const self = m.fromId === (me && me.id);
-    const wrap = el2('div', 'msg' + (self ? ' self' : '') + (m.recalled ? ' recalled' : ''));
-    wrap.dataset.id = m.id;
-
-    const av = el2('div', 'av', initial(m.nick));
-    av.style.background = colorOf(m.nick);
-
-    const body = el2('div', 'body');
-    const top = el2('div', 'top');
-    top.append(el2('b', null, self ? '我' : m.nick), el2('span', null, timeOf(m.ts)));
-
-    // 附件渲染
-    if (m.file && !m.recalled) body.append(buildAttach(m.file));
-
-    const bubble = el2('div', 'bubble');
-    if (m.recalled) bubble.textContent = '消息已撤回';
-    else bubble.textContent = m.text || '';
-    if (m.recalled || m.text) body.append(bubble);
-
-    const acts = el2('div', 'acts');
-    if (!m.recalled) {
-      if (self || can('chat.recall.any')) {
-        const b = el2('button', 'act', '撤回');
-        b.onclick = () => ws.send(JSON.stringify({ type: 'dm:recall', convKey, messageId: m.id }));
-        acts.append(b);
-      }
-      if (!self && can('chat.report')) {
-        const b = el2('button', 'act', '举报');
-        b.onclick = () => openReport(m, 'dm');
-        acts.append(b);
-      }
+    if(self&&!m.recalled){
+      const rt=el2('span','read-tag'+(m.readAt?' read':''),m.readAt?'已读':'未读'); rt.dataset.read=m.id; top.append(rt);
     }
-    // 已读回执（仅自己发的消息显示）
-    if (self && !m.recalled) {
-      const rt = el2('span', 'read-tag' + (m.readAt ? ' read' : ''), m.readAt ? '已读' : '未读');
-      rt.dataset.read = m.id;
-      top.append(rt);
-    }
-
-    body.insertBefore(top, body.firstChild);
-    body.append(acts);
-    wrap.append(av, body);
-    el.feed.appendChild(wrap);
-    scrollDown();
+    body.insertBefore(top,body.firstChild); body.append(acts);
+    wrap.append(av,body);
+    el.feed.appendChild(wrap); scrollDown();
   }
-
-  function buildAttach(file) {
-    const isImg = (file.mime || '').startsWith('image/');
-    const box = el2('div', 'attach-card');
-    const url = `/api/files/${file.stored}`;
-
-    if (isImg) {
-      const img = document.createElement('img');
-      img.className = 'attach-img';
-      img.src = url;
-      img.alt = file.name;
-      img.onclick = () => window.open(url, '_blank');
-      box.style.padding = '6px';
-      box.appendChild(img);
-      return box;
-    }
-    const ico = el2('div', 'ico', fileIcon(file.mime));
-    const meta = el2('div', 'meta2');
-    const a = document.createElement('a');
-    a.href = url; a.target = '_blank'; a.download = file.name;
-    a.className = 'nm2'; a.textContent = file.name;
-    a.style.color = 'inherit';
-    meta.append(a, el2('div', 'sz', humanSize(file.size)));
-    box.append(ico, meta);
-    return box;
+  function buildAttach(file){
+    const isImg=(file.mime||'').startsWith('image/');
+    const box=el2('div','attach-card');
+    const url=file.stored?sb.storage.from('attachments').getPublicUrl(file.stored).data.publicUrl:'#';
+    if(isImg){ const img=document.createElement('img'); img.className='attach-img'; img.src=url; img.alt=file.name; img.onclick=()=>window.open(url,'_blank'); box.style.padding='6px'; box.appendChild(img); return box; }
+    const ico=el2('div','ico',fileIcon(file.mime));
+    const meta=el2('div','meta2');
+    const a=document.createElement('a'); a.href=url; a.target='_blank'; a.download=file.name; a.className='nm2'; a.textContent=file.name; a.style.color='inherit';
+    meta.append(a,el2('div','sz',humanSize(file.size)));
+    box.append(ico,meta); return box;
   }
-
-  function fileIcon(mime) {
-    if ((mime || '').startsWith('image/')) return '🖼';
-    if (mime === 'application/pdf') return '📕';
-    if ((mime || '').includes('zip')) return '🗜';
-    if ((mime || '').includes('word')) return '📘';
-    if ((mime || '').includes('sheet')) return '📗';
+  function fileIcon(mime){
+    if((mime||'').startsWith('image/')) return '🖼';
+    if(mime==='application/pdf') return '📕';
+    if((mime||'').includes('zip')) return '🗜';
+    if((mime||'').includes('word')) return '📘';
+    if((mime||'').includes('sheet')) return '📗';
     return '📄';
   }
-  function humanSize(n) {
-    if (n < 1024) return n + ' B';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    return (n / 1024 / 1024).toFixed(1) + ' MB';
-  }
-
-  function markDmRecalled(messageId, by) {
-    const w = el.feed.querySelector(`[data-id="${messageId}"]`);
-    if (!w) return;
+  function humanSize(n){ if(n<1024) return n+' B'; if(n<1024*1024) return (n/1024).toFixed(1)+' KB'; return (n/1024/1024).toFixed(1)+' MB'; }
+  function markDmRecalled(messageId,by){
+    const w=el.feed.querySelector(`[data-id="${messageId}"]`);
+    if(!w) return;
     w.classList.add('recalled');
-    const bubble = w.querySelector('.bubble');
-    if (bubble) bubble.textContent = `消息已被 ${by} 撤回`;
-    const acts = w.querySelector('.acts');
-    if (acts) acts.textContent = '';
+    const bubble=w.querySelector('.bubble'); if(bubble) bubble.textContent=`消息已被 ${by} 撤回`;
+    const acts=w.querySelector('.acts'); if(acts) acts.textContent='';
   }
-
-  function renderTyping() {
-    const names = [...dmTypingPeers.values()].map((v) => v.nick).filter(Boolean);
-    el.typing.textContent = !names.length ? ''
-      : names.length === 1 ? `${names[0]} 正在输入…`
-      : `${names.slice(0, 3).join('、')} 正在输入…`;
+  function renderTyping(){
+    const names=[...dmTypingPeers.values()].map((v)=>v.nick).filter(Boolean);
+    el.typing.textContent=!names.length?'':names.length===1?`${names[0]} 正在输入…`:`${names.slice(0,3).join('、')} 正在输入…`;
   }
-
-  // 在线用户集合（用于会话列表在线点）
-  const onlinePeers = new Set();
+  async function sendDm(text){
+    if(!peer) return;
+    if(peerBlocked||peerBlockedMe){ toast('无法发送：你们之间存在拉黑关系'); return; }
+    const rec={conv_key:convKey,from_id:me.id,to_id:peer.id,nick:me.username,text,ts:Date.now()};
+    const {data,error}=await sb.from('dms').insert(rec).select().single();
+    if(error){ toast('发送失败'); return; }
+    dmChTo(peer.id).send({type:'broadcast',event:'message',payload:normDm(data)});
+  }
+  function onDmMessage(m){
+    if(m.fromId!==me.id) onlinePeers.add(m.fromId);
+    if(m.convKey===convKey){ addDmMessage(m); if(m.fromId!==me.id){ sb.rpc('mark_read',{conv:convKey}); } }
+    else if(m.fromId!==me.id){ toast(`收到来自 ${m.nick} 的私聊消息`); }
+    loadConvs();
+  }
+  function onDmTyping(p){
+    if(p.fromId!==me.id&&p.convKey===convKey){
+      if(dmTypingPeers.has(p.fromId)) clearTimeout(dmTypingPeers.get(p.fromId).timer);
+      if(p.active){ dmTypingPeers.set(p.fromId,{nick:p.nick,timer:setTimeout(()=>{ dmTypingPeers.delete(p.fromId); renderTyping(); },3000)}); }
+      else dmTypingPeers.delete(p.fromId);
+      renderTyping();
+    }
+  }
 
   // 发起私聊：用户选择器
-  el.newDmBtn.onclick = async () => {
-    hideBox(el.pickMsg);
-    el.pickSearch.value = '';
-    open_(el.pickUserModal);
-    await renderPickList('');
-    el.pickSearch.focus();
-  };
-  el.pickSearch.addEventListener('input', () => {
-    clearTimeout(dmSearchTimer);
-    dmSearchTimer = setTimeout(() => renderPickList(el.pickSearch.value), 250);
-  });
-
-  el.dmSearch.addEventListener('input', () => {
-    clearTimeout(dmSearchTimer);
-    dmSearchTimer = setTimeout(() => loadConvs(el.dmSearch.value), 250);
-  });
-
-  async function renderPickList(q) {
-    const r = await api('GET', '/api/users' + (q ? '?q=' + encodeURIComponent(q) : ''));
-    el.pickList.textContent = '';
-    if (r.status !== 200) return showBox(el.pickMsg, r.data?.error || '加载失败', 'err');
-    const list = r.data.users;
-    if (!list.length) {
-      el.pickList.appendChild(el2('div', 'empty', '没有匹配的用户'));
-      return;
-    }
-    list.forEach((u) => {
-      const d = el2('div', 'conv');
-      const av = el2('div', 'av', initial(u.username));
-      av.style.background = colorOf(u.username);
-      const info = el2('div', 'info');
-      const nm = el2('div', 'nm');
-      const dot = el2('span', 'online-dot' + (onlinePeers.has(u.id) ? ' on' : ''));
-      nm.append(dot, el2('span', null, u.username));
-      nm.append(el2('span', 'badge ' + u.role, ROLE_LABEL[u.role]));
-      info.append(nm);
-      if (u.blocked) info.append(el2('div', 'pv', '已在你黑名单中'));
-      d.append(av, info);
-
-      const btn = el2('button', 'act', '发起');
-      btn.onclick = (e) => {
-        e.stopPropagation();
-        if (u.blockedMe) { toast('对方已将你拉黑，无法发起私聊'); return; }
-        close_(el.pickUserModal);
-        openDm(u.id);
-      };
+  el.newDmBtn.onclick=async()=>{ hideBox(el.pickMsg); el.pickSearch.value=''; open_(el.pickUserModal); await renderPickList(''); el.pickSearch.focus(); };
+  el.pickSearch.addEventListener('input',()=>{ clearTimeout(dmSearchTimer); dmSearchTimer=setTimeout(()=>renderPickList(el.pickSearch.value),250); });
+  el.dmSearch.addEventListener('input',()=>{ clearTimeout(dmSearchTimer); dmSearchTimer=setTimeout(()=>loadConvs(),250); });
+  async function renderPickList(q){
+    const {data,error}=await sb.from('users').select('*').eq('status','active').neq('id',me.id);
+    el.pickList.textContent='';
+    if(error) return showBox(el.pickMsg,error.message,'err');
+    const list=(data||[]).filter((u)=>!q||u.username.toLowerCase().includes(q.toLowerCase()));
+    if(!list.length){ el.pickList.appendChild(el2('div','empty','没有匹配的用户')); return; }
+    list.forEach((u)=>{
+      const d=el2('div','conv');
+      const av=el2('div','av',initial(u.username)); av.style.background=colorOf(u.username);
+      const info=el2('div','info');
+      const nm=el2('div','nm'); nm.append(el2('span',null,u.username),el2('span','badge '+u.role,ROLE_LABEL[u.role]));
+      info.append(nm); d.append(av,info);
+      const btn=el2('button','act','发起');
+      btn.onclick=(e)=>{ e.stopPropagation(); close_(el.pickUserModal); openDm(u.id); };
       d.append(btn);
-      d.onclick = () => { close_(el.pickUserModal); openDm(u.id); };
+      d.onclick=()=>{ close_(el.pickUserModal); openDm(u.id); };
       el.pickList.appendChild(d);
     });
   }
 
-  // 会话操作菜单
-  el.peerMenuBtn.onclick = (e) => {
-    if (!peer) return;
+  el.peerMenuBtn.onclick=(e)=>{
+    if(!peer) return;
     e.stopPropagation();
-    document.querySelectorAll('.menu').forEach((m) => m.remove());
-    const menu = el2('div', 'menu');
-    const b1 = el2('button', null, peerBlocked ? '解除拉黑' : '拉黑此人');
-    if (peerBlocked) b1.className = '';
-    b1.onclick = async () => {
-      menu.remove();
-      const r = await api('POST', `/api/dm/${peer.id}/block`, { blocked: !peerBlocked });
-      if (r.status !== 200) return toast(r.data?.error || '操作失败');
-      peerBlocked = !peerBlocked;
-      toast(peerBlocked ? `已拉黑 ${peer.username}` : `已解除拉黑 ${peer.username}`);
-      openDm(peer.id);
-      loadBlocks(); loadConvs();
-    };
-    const b2 = el2('button', null, '查看资料');
-    b2.onclick = () => {
-      menu.remove();
-      alert(`${peer.username}\n角色：${ROLE_LABEL[peer.role]}\n状态：${peerOnline ? '在线' : '离线'}`);
-    };
-    menu.append(b2, b1);
+    document.querySelectorAll('.menu').forEach((m)=>m.remove());
+    const menu=el2('div','menu');
+    const b1=el2('button',null,peerBlocked?'解除拉黑':'拉黑此人');
+    if(peerBlocked) b1.className='';
+    b1.onclick=async()=>{ menu.remove();
+      const {error}=await sb.rpc('toggle_block',{target:peer.id,blocked:!peerBlocked});
+      if(error) return toast(error.message);
+      peerBlocked=!peerBlocked; toast(peerBlocked?`已拉黑 ${peer.username}`:`已解除拉黑 ${peer.username}`);
+      openDm(peer.id); loadBlocks(); loadConvs(); };
+    const b2=el2('button',null,'查看资料');
+    b2.onclick=()=>{ menu.remove(); alert(`${peer.username}\n角色：${ROLE_LABEL[peer.role]}\n状态：${peerOnline?'在线':'离线'}`); };
+    menu.append(b2,b1);
     document.body.appendChild(menu);
-    const rect = el.peerMenuBtn.getBoundingClientRect();
-    menu.style.top = (rect.bottom + 6) + 'px';
-    menu.style.left = Math.max(8, rect.right - menu.offsetWidth) + 'px';
+    const rect=el.peerMenuBtn.getBoundingClientRect();
+    menu.style.top=(rect.bottom+6)+'px'; menu.style.left=Math.max(8,rect.right-menu.offsetWidth)+'px';
   };
-  document.addEventListener('click', () => {
-    document.querySelectorAll('.menu').forEach((m) => m.remove());
-  });
+  document.addEventListener('click',()=>{ document.querySelectorAll('.menu').forEach((m)=>m.remove()); });
 
-  // ---------- 文件上传 ----------
-  el.attachBtn.onclick = () => {
-    if (mode !== 'dm' || !peer) return toast('文件发送仅支持私聊');
-    el.fileInput.click();
-  };
-  el.fileInput.onchange = async () => {
-    const f = el.fileInput.files && el.fileInput.files[0];
-    if (!f) return;
-    if (f.size > 5 * 1024 * 1024) {
-      toast('文件超过 5MB 限制');
-      el.fileInput.value = '';
-      return;
-    }
-    el.uploadBar.className = 'upload-bar on';
-    el.uploadBar.textContent = `正在上传 ${f.name} …`;
-
-    try {
-      const res = await fetch('/api/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': f.type || 'application/octet-stream',
-                   'X-File-Name': encodeURIComponent(f.name) },
-        body: f,
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '上传失败');
-      el.uploadBar.textContent = '上传完成，发送中…';
-      ws.send(JSON.stringify({
-        type: 'dm:message', peerId: peer.id, text: '', file: data.file,
-      }));
-      setTimeout(() => { el.uploadBar.className = 'upload-bar'; }, 1200);
-    } catch (err) {
-      el.uploadBar.textContent = '';
-      el.uploadBar.className = 'upload-bar';
-      toast('上传失败：' + err.message);
-    }
-    el.fileInput.value = '';
+  // ================= 文件上传 =================
+  el.attachBtn.onclick=()=>{ if(mode!=='dm'||!peer) return toast('文件发送仅支持私聊'); el.fileInput.click(); };
+  el.fileInput.onchange=async()=>{
+    const f=el.fileInput.files&&el.fileInput.files[0];
+    if(!f) return;
+    if(f.size>5*1024*1024){ toast('文件超过 5MB 限制'); el.fileInput.value=''; return; }
+    el.uploadBar.className='upload-bar on'; el.uploadBar.textContent=`正在上传 ${f.name} …`;
+    try{
+      const ext=(f.name.includes('.')?'.'+f.name.split('.').pop():'');
+      const path=`dm/${convKey}/${crypto.randomUUID()}${ext}`;
+      const {error}=await sb.storage.from('attachments').upload(path,f);
+      if(error) throw new Error(error.message);
+      const rec={conv_key:convKey,from_id:me.id,to_id:peer.id,nick:me.username,text:'',ts:Date.now(),
+        file_stored:path,file_name:f.name,file_size:f.size,file_mime:f.type};
+      const {data,error:e2}=await sb.from('dms').insert(rec).select().single();
+      if(e2) throw new Error(e2.message);
+      dmChTo(peer.id).send({type:'broadcast',event:'message',payload:normDm(data)});
+      el.uploadBar.textContent='上传完成'; setTimeout(()=>{ el.uploadBar.className='upload-bar'; },1200);
+    }catch(err){ el.uploadBar.className='upload-bar'; toast('上传失败：'+err.message); }
+    el.fileInput.value='';
   };
 
   // ================= 举报 =================
-  let reportKind = 'room';
-  function openReport(m, kind) {
-    replyTarget = m;
-    reportKind = kind || 'room';
-    hideBox($('reportMsg'));
-    $('rpReason').value = '';
-    $('reportTitle').textContent = reportKind === 'dm' ? '举报私聊消息' : '举报消息';
-    open_(el.reportModal);
-  }
-  $('rpSubmit').onclick = async () => {
-    if (!replyTarget) return;
-    const reason = $('rpReason').value;
-
-    if (reportKind === 'dm') {
-      // 私聊举报走 WebSocket，便于服务端校验会话归属
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        return showBox($('reportMsg'), '连接已断开，请稍后重试', 'err');
-      }
-      ws.send(JSON.stringify({
-        type: 'dm:report', convKey, messageId: replyTarget.id, reason,
-      }));
-      showBox($('reportMsg'), '举报已提交，管理员会尽快处理', 'ok');
-      setTimeout(() => close_(el.reportModal), 1000);
-      return;
-    }
-
-    const r = await api('POST', '/api/reports', { roomId, messageId: replyTarget.id, reason });
-    if (r.status === 200) {
-      showBox($('reportMsg'), '举报已提交，管理员会尽快处理', 'ok');
-      setTimeout(() => close_(el.reportModal), 1000);
-    } else {
-      showBox($('reportMsg'), r.data?.error || '提交失败', 'err');
-    }
+  let reportKind='room';
+  function openReport(m,kind){ replyTarget=m; reportKind=kind||'room'; hideBox($('reportMsg')); $('rpReason').value='';
+    $('reportTitle').textContent=reportKind==='dm'?'举报私聊消息':'举报消息'; open_(el.reportModal); }
+  $('rpSubmit').onclick=async()=>{
+    if(!replyTarget) return;
+    const reason=$('rpReason').value;
+    const {error}=reportKind==='dm'
+      ? await sb.rpc('add_dm_report',{conv:convKey,message_id:replyTarget.id,reason})
+      : await sb.rpc('add_report',{room_id:roomId,message_id:replyTarget.id,reason});
+    if(error) return showBox($('reportMsg'),error.message,'err');
+    showBox($('reportMsg'),'举报已提交，管理员会尽快处理','ok'); setTimeout(()=>close_(el.reportModal),1000);
   };
 
   // ================= 建房间 =================
-  el.newRoomBtn.onclick = () => { hideBox($('roomMsg')); $('rName').value = ''; open_(el.roomModal); };
-  $('rCreate').onclick = async () => {
-    const r = await api('POST', '/api/rooms', { name: $('rName').value, type: $('rType').value });
-    if (r.status === 200) {
-      close_(el.roomModal);
-      await loadRooms();
-      joinRoom(r.data.room.id);
-    } else {
-      showBox($('roomMsg'), r.data?.error || '创建失败', 'err');
-    }
+  el.newRoomBtn.onclick=()=>{ hideBox($('roomMsg')); $('rName').value=''; open_(el.roomModal); };
+  $('rCreate').onclick=async()=>{
+    const {data:rid,error}=await sb.rpc('add_room',{name:$('rName').value,type:$('rType').value});
+    if(error) return showBox($('roomMsg'),error.message,'err');
+    close_(el.roomModal); await loadRooms(); if(rid) joinRoom(rid);
   };
 
   // ================= 弹层开关 =================
-  const open_ = (n) => n.classList.remove('hidden');
-  const close_ = (n) => n.classList.add('hidden');
-  document.querySelectorAll('[data-close]').forEach((b) =>
-    b.onclick = () => close_(b.closest('.overlay')));
-  document.querySelectorAll('.overlay').forEach((o) =>
-    o.addEventListener('click', (e) => { if (e.target === o) close_(o); }));
+  const open_=(n)=>n.classList.remove('hidden');
+  const close_=(n)=>n.classList.add('hidden');
+  document.querySelectorAll('[data-close]').forEach((b)=>b.onclick=()=>close_(b.closest('.overlay')));
+  document.querySelectorAll('.overlay').forEach((o)=>o.addEventListener('click',(e)=>{ if(e.target===o) close_(o); }));
 
   // ================= 管理后台 =================
-  el.adminBtn.onclick = () => { open_(el.adminModal); renderAdmin(); };
-  el.admTabs.addEventListener('click', (e) => {
-    const b = e.target.closest('button[data-tab]');
-    if (!b) return;
-    admTab = b.dataset.tab;
-    [...el.admTabs.children].forEach((x) => x.classList.toggle('on', x === b));
-    renderAdmin();
-  });
+  el.adminBtn.onclick=()=>{ open_(el.adminModal); renderAdmin(); };
+  el.admTabs.addEventListener('click',(e)=>{ const b=e.target.closest('button[data-tab]'); if(!b) return;
+    admTab=b.dataset.tab; [...el.admTabs.children].forEach((x)=>x.classList.toggle('on',x===b)); renderAdmin(); });
 
-  function table(headers, rows, empty) {
-    if (!rows.length) return el2('div', 'empty', empty || '暂无数据');
-    const t = el2('table');
-    const thead = el2('thead'), tr = el2('tr');
-    headers.forEach((h) => tr.appendChild(el2('th', null, h)));
-    thead.appendChild(tr); t.appendChild(thead);
-    const tb = el2('tbody');
-    rows.forEach((cells) => {
-      const r = el2('tr');
-      cells.forEach((c) => {
-        const td = el2('td');
-        if (c instanceof Node) td.appendChild(c); else td.textContent = c ?? '';
-        r.appendChild(td);
-      });
-      tb.appendChild(r);
-    });
-    t.appendChild(tb);
-    return t;
+  function table(headers,rows,empty){
+    if(!rows.length) return el2('div','empty',empty||'暂无数据');
+    const t=el2('table'); const thead=el2('thead'),tr=el2('tr');
+    headers.forEach((h)=>tr.appendChild(el2('th',null,h))); thead.appendChild(tr); t.appendChild(thead);
+    const tb=el2('tbody');
+    rows.forEach((cells)=>{ const r=el2('tr'); cells.forEach((c)=>{ const td=el2('td'); if(c instanceof Node) td.appendChild(c); else td.textContent=c??''; r.appendChild(td); }); tb.appendChild(r); });
+    t.appendChild(tb); return t;
+  }
+  function tag(text,cls){ return el2('span','tag '+cls,text); }
+  function actBtn(label,fn,danger){
+    const b=el2('button','hbtn'+(danger?' danger':''),label);
+    if(danger) b.style.cssText='background:#ff5c5c22;border-color:#ff5c5c55;color:#ffb3b3';
+    b.onclick=fn; return b;
+  }
+  function showAdmErr(msg){ el.admBody.textContent=''; el.admBody.appendChild(el2('div','empty',msg||'加载失败')); }
+
+  async function renderAdmin(){
+    el.admBody.textContent=''; el.admBody.appendChild(el2('div','empty','加载中…'));
+    if(admTab==='users') return renderUsersTab();
+    if(admTab==='approve') return renderApproveTab();
+    if(admTab==='rooms') return renderRoomsTab();
+    if(admTab==='messages') return renderMessagesTab();
+    if(admTab==='dms') return renderDmsTab();
+    if(admTab==='reports') return renderReportsTab();
+    if(admTab==='audit') return renderAuditTab();
   }
 
-  function tag(text, cls) { return el2('span', 'tag ' + cls, text); }
-
-  async function renderAdmin() {
-    el.admBody.textContent = '';
-    el.admBody.appendChild(el2('div', 'empty', '加载中…'));
-
-    if (admTab === 'users') return renderUsersTab();
-    if (admTab === 'approve') return renderApproveTab();
-    if (admTab === 'rooms') return renderRoomsTab();
-    if (admTab === 'messages') return renderMessagesTab();
-    if (admTab === 'dms') return renderDmsTab();
-    if (admTab === 'reports') return renderReportsTab();
-    if (admTab === 'audit') return renderAuditTab();
-  }
-
-  function actBtn(label, fn, danger) {
-    const b = el2('button', 'hbtn' + (danger ? ' danger' : ''), label);
-    if (danger) b.style.cssText = 'background:#ff5c5c22;border-color:#ff5c5c55;color:#ffb3b3';
-    b.onclick = fn;
-    return b;
-  }
-
-  async function renderUsersTab() {
-    const r = await api('GET', '/api/admin/users');
-    if (r.status !== 200) return showAdmErr(r.data?.error);
-    const rows = r.data.users.map((u) => {
-      const acts = el2('div', 'row-acts');
-      if (u.status === 'pending') {
-        acts.append(actBtn('通过', async () => {
-          await api('POST', `/api/admin/users/${u.id}/approve`); renderAdmin();
-        }));
-        acts.append(actBtn('拒绝', async () => {
-          if (confirm(`拒绝并删除 ${u.username} 的注册申请？`)) {
-            await api('POST', `/api/admin/users/${u.id}/reject`); renderAdmin();
-          }
-        }, true));
+  async function renderUsersTab(){
+    const {data,error}=await sb.rpc('admin_users');
+    if(error) return showAdmErr(error.message);
+    const rows=(data||[]).map((u)=>{
+      const acts=el2('div','row-acts');
+      if(u.status==='pending'){
+        acts.append(actBtn('通过',async()=>{ await sb.rpc('approve_user',{target:u.id}); renderAdmin(); }));
+        acts.append(actBtn('拒绝',async()=>{ if(confirm(`拒绝并删除 ${u.username} 的注册申请？`)){ await sb.rpc('reject_user',{target:u.id}); renderAdmin(); } },true));
       } else {
-        const sel = el2('select', 'input');
-        sel.style.cssText = 'width:auto;padding:4px 8px;font-size:12px';
-        ['user','mod','admin'].forEach((role) => {
-          const o = el2('option', null, ROLE_LABEL[role]); o.value = role;
-          if (role === u.role) o.selected = true;
-          sel.appendChild(o);
-        });
-        sel.onchange = async () => {
-          const res = await api('POST', `/api/admin/users/${u.id}/role`, { role: sel.value });
-          if (res.status !== 200) { alert(res.data?.error); renderAdmin(); }
-        };
+        const sel=el2('select','input'); sel.style.cssText='width:auto;padding:4px 8px;font-size:12px';
+        ['user','mod','admin'].forEach((role)=>{ const o=el2('option',null,ROLE_LABEL[role]); o.value=role; if(role===u.role) o.selected=true; sel.appendChild(o); });
+        sel.onchange=async()=>{ const {error}=await sb.rpc('set_user_role',{target:u.id,role:sel.value}); if(error) alert(error.message); renderAdmin(); };
         acts.append(sel);
-        if (u.mute) acts.append(actBtn('解除禁言',
-          async () => { await api('POST', `/api/admin/users/${u.id}/unmute`); renderAdmin(); }));
-        else acts.append(actBtn('禁言', async () => {
-          const min = prompt('禁言时长（分钟）', '10');
-          if (min) { await api('POST', `/api/admin/users/${u.id}/mute`, { minutes: +min }); renderAdmin(); }
-        }));
-        acts.append(u.status === 'banned'
-          ? actBtn('解封', async () => {
-              await api('POST', `/api/admin/users/${u.id}/status`, { status: 'active' }); renderAdmin();
-            })
-          : actBtn('封禁', async () => {
-              if (confirm(`确定封禁 ${u.username}？其会话将立即失效。`)) {
-                await api('POST', `/api/admin/users/${u.id}/status`, { status: 'banned' }); renderAdmin();
-              }
-            }, true));
+        if(u.muted_until>Date.now()) acts.append(actBtn('解除禁言',async()=>{ await sb.rpc('unmute_user',{target:u.id}); renderAdmin(); }));
+        else acts.append(actBtn('禁言',async()=>{ const min=prompt('禁言时长（分钟）','10'); if(min) { await sb.rpc('mute_user',{target:u.id,minutes:+min}); renderAdmin(); } }));
+        acts.append(u.status==='banned'?actBtn('解封',async()=>{ await sb.rpc('set_user_status',{target:u.id,status:'active'}); renderAdmin(); })
+          :actBtn('封禁',async()=>{ if(confirm(`确定封禁 ${u.username}？`)){ await sb.rpc('set_user_status',{target:u.id,status:'banned'}); renderAdmin(); } },true));
       }
-      return [
-        u.username,
-        tag(ROLE_LABEL[u.role], u.role),
-        tag({ active: '正常', pending: '待审批', banned: '已封禁' }[u.status], u.status),
-        u.mute ? `至 ${fullTime(u.mute.until)}` : '—',
-        fullTime(u.createdAt),
-        acts,
-      ];
+      return [u.username,tag(ROLE_LABEL[u.role],u.role),tag({active:'正常',pending:'待审批',banned:'已封禁'}[u.status],u.status),
+        u.muted_until>Date.now()?fullTime(u.muted_until):'—',fullTime(u.created_at),acts];
     });
-    el.admBody.textContent = '';
-    el.admBody.appendChild(table(['用户名','角色','状态','禁言','注册时间','操作'], rows, '暂无用户'));
+    el.admBody.textContent=''; el.admBody.appendChild(table(['用户名','角色','状态','禁言','注册时间','操作'],rows,'暂无用户'));
   }
-
-  async function renderApproveTab() {
-    const r = await api('GET', '/api/admin/users');
-    const pend = (r.data?.users || []).filter((u) => u.status === 'pending');
-    el.admBody.textContent = '';
-
-    const pendingBadge = $('tabApprove');
-    pendingBadge.innerHTML = '待审批';
-    if (pend.length) {
-      const p = el2('span', 'pill', pend.length);
-      pendingBadge.appendChild(p);
-    }
-
-    const rows = pend.map((u) => {
-      const acts = el2('div', 'row-acts');
-      acts.append(actBtn('✓ 通过', async () => {
-        await api('POST', `/api/admin/users/${u.id}/approve`); renderAdmin();
-      }));
-      acts.append(actBtn('✕ 拒绝', async () => {
-        if (confirm(`拒绝并删除 ${u.username}？`)) {
-          await api('POST', `/api/admin/users/${u.id}/reject`); renderAdmin();
-        }
-      }, true));
-      return [u.username, fullTime(u.createdAt), acts];
-    });
-    el.admBody.appendChild(
-      table(['用户名','申请时间','操作'], rows, '没有待审批的注册申请'));
+  async function renderApproveTab(){
+    const {data}=await sb.rpc('admin_users');
+    const pend=(data||[]).filter((u)=>u.status==='pending');
+    el.admBody.textContent='';
+    const pb=$('tabApprove'); pb.innerHTML='待审批'; if(pend.length){ const p=el2('span','pill',pend.length); pb.appendChild(p); }
+    const rows=pend.map((u)=>{ const acts=el2('div','row-acts');
+      acts.append(actBtn('✓ 通过',async()=>{ await sb.rpc('approve_user',{target:u.id}); renderAdmin(); }));
+      acts.append(actBtn('✕ 拒绝',async()=>{ if(confirm(`拒绝并删除 ${u.username}？`)){ await sb.rpc('reject_user',{target:u.id}); renderAdmin(); } },true));
+      return [u.username,fullTime(u.created_at),acts]; });
+    el.admBody.appendChild(table(['用户名','申请时间','操作'],rows,'没有待审批的注册申请'));
   }
-
-  async function renderRoomsTab() {
-    const [rr, ur] = await Promise.all([
-      api('GET', '/api/admin/rooms'),
-      api('GET', '/api/admin/users'),
-    ]);
-    const users = (ur.data?.users || []).filter((u) => u.status === 'active');
-
-    const rows = (rr.data?.rooms || []).map((room) => {
-      const acts = el2('div', 'row-acts');
-      acts.append(actBtn('公告', async () => {
-        const text = prompt(`为「${room.name}」设置公告（留空则清除）`, room.announce || '');
-        if (text !== null) {
-          await api('POST', `/api/admin/rooms/${room.id}/announce`, { text });
-          toast('公告已更新'); renderAdmin();
-        }
-      }));
-      if (room.type === 'private') {
-        acts.append(actBtn('加成员', async () => {
-          const name = prompt('要添加的用户名');
-          const u = users.find((x) => x.username === name);
-          if (!u) return alert('未找到该用户');
-          await api('POST', `/api/admin/rooms/${room.id}/members`, { userId: u.id, member: true });
-          toast(`已将 ${name} 加入 ${room.name}`); renderAdmin();
-        }));
-      }
-      acts.append(actBtn('删除', async () => {
-        if (confirm(`删除房间「${room.name}」及其全部消息？`)) {
-          const res = await api('DELETE', `/api/admin/rooms/${room.id}`);
-          if (res.status !== 200) alert(res.data?.error);
-          renderAdmin();
-        }
-      }, true));
-      return [
-        room.name,
-        room.type === 'private' ? tag('私有', 'mod') : tag('公开', 'user'),
-        room.memberCount,
-        room.messageCount,
-        room.announce || '—',
-        acts,
-      ];
-    });
-    el.admBody.textContent = '';
-    el.admBody.appendChild(
-      table(['房间','类型','成员','消息数','公告','操作'], rows, '暂无房间'));
+  async function renderRoomsTab(){
+    const [{data:rr},{data:ur}]=await Promise.all([sb.rpc('admin_rooms'),sb.rpc('admin_users')]);
+    const users=(ur||[]).filter((u)=>u.status==='active');
+    const rows=(rr||[]).map((room)=>{ const acts=el2('div','row-acts');
+      acts.append(actBtn('公告',async()=>{ const text=prompt(`为「${room.name}」设置公告（留空清除）`,room.announce||''); if(text!==null){ await sb.rpc('set_announce',{rid:room.id,text}); toast('公告已更新'); renderAdmin(); } }));
+      if(room.type==='private') acts.append(actBtn('加成员',async()=>{ const name=prompt('要添加的用户名'); const u=users.find((x)=>x.username===name); if(!u) return alert('未找到该用户'); await sb.rpc('set_member',{rid:room.id,uid:u.id,is_member:true}); toast(`已将 ${name} 加入 ${room.name}`); renderAdmin(); }));
+      acts.append(actBtn('删除',async()=>{ if(confirm(`删除房间「${room.name}」及其全部消息？`)){ const {error}=await sb.rpc('delete_room',{rid:room.id}); if(error) alert(error.message); renderAdmin(); } },true));
+      return [room.name,room.type==='private'?tag('私有','mod'):tag('公开','user'),room.member_count,room.message_count,room.announce||'—',acts]; });
+    el.admBody.textContent=''; el.admBody.appendChild(table(['房间','类型','成员','消息数','公告','操作'],rows,'暂无房间'));
   }
-
-  async function renderMessagesTab() {
-    el.admBody.textContent = '';
-
-    const doQuery = async (q, roomFilter) => {
-      [...el.admBody.querySelectorAll('table, .empty')].forEach((n) => n.remove());
-      const url = `/api/admin/messages?limit=200${q ? '&q=' + encodeURIComponent(q) : ''}` +
-                  (roomFilter ? '&roomId=' + roomFilter : '');
-      const r = await api('GET', url);
-      const rows = (r.data?.messages || []).map((m) => {
-        const acts = el2('div', 'row-acts');
-        if (m.recalled) {
-          acts.append(el2('span', null, '已撤回'));
-        } else {
-          acts.append(actBtn('撤回', async () => {
-            await api('POST', '/api/admin/messages/recall',
-              { roomId: m.roomId, messageId: m.id });
-            toast('已撤回'); doQuery(q, roomFilter);
-          }));
-          acts.append(actBtn('删除', async () => {
-            if (confirm('永久删除该消息？')) {
-              await api('DELETE', '/api/admin/messages', { roomId: m.roomId, messageId: m.id });
-              doQuery(q, roomFilter);
-            }
-          }, true));
-        }
-        return [m.roomName, m.nick, m.recalled ? '（已撤回）' : m.text, fullTime(m.ts), acts];
-      });
-      el.admBody.appendChild(
-        table(['房间','发送者','内容','时间','操作'], rows, '没有匹配的消息'));
+  async function renderMessagesTab(){
+    el.admBody.textContent='';
+    const doQuery=async(q,roomFilter)=>{
+      [...el.admBody.querySelectorAll('table, .empty')].forEach((n)=>n.remove());
+      const {data,error}=await sb.rpc('admin_messages',{q:q||'',room_filter:roomFilter||null});
+      if(error) return showAdmErr(error.message);
+      const rows=(data||[]).map((m)=>{ const acts=el2('div','row-acts');
+        if(m.recalled) acts.append(el2('span',null,'已撤回'));
+        else { acts.append(actBtn('撤回',async()=>{ await sb.rpc('recall_message',{rid:m.room_id,mid:m.id}); toast('已撤回'); doQuery(q,roomFilter); }));
+          acts.append(actBtn('删除',async()=>{ if(confirm('永久删除该消息？')){ await sb.rpc('delete_message',{rid:m.room_id,mid:m.id}); doQuery(q,roomFilter); } },true)); }
+        return [m.room_name,m.nick,m.recalled?'（已撤回）':m.text,fullTime(m.ts),acts]; });
+      el.admBody.appendChild(table(['房间','发送者','内容','时间','操作'],rows,'没有匹配的消息'));
     };
-
-    const bar = el2('div', 'bar');
-    const input = el2('input', 'input');
-    input.placeholder = '搜索消息内容…';
-    input.style.cssText = 'max-width:300px';
-    const btn = actBtn('搜索', () => doQuery(input.value, sel.value || undefined));
-    const sel = el2('select', 'input');
-    sel.style.cssText = 'max-width:220px;width:auto';
-    sel.appendChild(el2('option', null, '全部房间'));
-    rooms.forEach((room) => {
-      const o = el2('option', null, room.name); o.value = room.id; sel.appendChild(o);
-    });
-    sel.onchange = () => doQuery(input.value, sel.value || undefined);
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') doQuery(input.value, sel.value || undefined);
-    });
-    bar.append(input, btn, sel);
-    el.admBody.appendChild(bar);
-
+    const bar=el2('div','bar');
+    const input=el2('input','input'); input.placeholder='搜索消息内容…'; input.style.cssText='max-width:300px';
+    const btn=actBtn('搜索',()=>doQuery(input.value,sel.value||null));
+    const sel=el2('select','input'); sel.style.cssText='max-width:220px;width:auto'; sel.appendChild(el2('option',null,'全部房间'));
+    rooms.forEach((room)=>{ const o=el2('option',null,room.name); o.value=room.id; sel.appendChild(o); });
+    sel.onchange=()=>doQuery(input.value,sel.value||null);
+    input.addEventListener('keydown',(e)=>{ if(e.key==='Enter') doQuery(input.value,sel.value||null); });
+    bar.append(input,btn,sel); el.admBody.appendChild(bar);
     await doQuery('');
   }
-
-  async function renderDmsTab() {
-    el.admBody.textContent = '';
-
-    const doQuery = async (q) => {
-      [...el.admBody.querySelectorAll('table, .empty, .bar + div')].forEach((n) => {
-        if (!n.classList.contains('bar')) n.remove();
-      });
-      const r = await api('GET', '/api/admin/dms?limit=200' +
-        (q ? '&q=' + encodeURIComponent(q) : ''));
-      const rows = (r.data?.messages || []).map((m) => {
-        const acts = el2('div', 'row-acts');
-        if (m.recalled) acts.append(el2('span', null, '已撤回'));
-        else acts.append(actBtn('撤回', async () => {
-          await api('POST', '/api/admin/dms/recall',
-            { convKey: m.convKey, messageId: m.id });
-          toast('已撤回'); doQuery(q);
-        }));
-        const content = m.recalled ? '（已撤回）'
-          : (m.file ? `[文件] ${m.file.name}` : (m.text || ''));
-        return [
-          m.members.join(' ↔ '), m.fromName, content, fullTime(m.ts), acts,
-        ];
-      });
-      const note = el2('div', null, r.data?.total != null
-        ? `命中 ${r.data.total} 条，显示前 ${rows.length} 条` : '');
-      note.style.cssText = 'font-size:12px;color:var(--muted);margin-bottom:10px';
+  async function renderDmsTab(){
+    el.admBody.textContent='';
+    const doQuery=async(q)=>{
+      [...el.admBody.querySelectorAll('table, .empty')].forEach((n)=>n.remove());
+      const {data,error}=await sb.rpc('admin_dms',{q:q||''});
+      if(error) return showAdmErr(error.message);
+      const rows=(data||[]).map((m)=>{ const acts=el2('div','row-acts');
+        if(m.recalled) acts.append(el2('span',null,'已撤回'));
+        else acts.append(actBtn('撤回',async()=>{ await sb.rpc('recall_dm',{conv:m.conv_key,mid:m.id}); toast('已撤回'); doQuery(q); }));
+        const content=m.recalled?'（已撤回）':(m.file_name?`[文件] ${m.file_name}`:(m.text||''));
+        return [`${m.from_name} ↔ ${m.to_name}`,m.from_name,content,fullTime(m.ts),acts]; });
+      const note=el2('div',null,`命中 ${rows.length} 条`); note.style.cssText='font-size:12px;color:var(--muted);margin-bottom:10px';
       el.admBody.appendChild(note);
-      el.admBody.appendChild(
-        table(['会话双方','发送者','内容','时间','操作'], rows, '没有匹配的私聊消息'));
+      el.admBody.appendChild(table(['会话双方','发送者','内容','时间','操作'],rows,'没有匹配的私聊消息'));
     };
-
-    const bar = el2('div', 'bar');
-    const input = el2('input', 'input');
-    input.placeholder = '搜索私聊内容或用户名…';
-    input.style.cssText = 'max-width:340px';
-    const btn = actBtn('搜索', () => doQuery(input.value));
-    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') doQuery(input.value); });
-    bar.append(input, btn);
-    el.admBody.appendChild(bar);
-
+    const bar=el2('div','bar'); const input=el2('input','input'); input.placeholder='搜索私聊内容或用户名…'; input.style.cssText='max-width:340px';
+    const btn=actBtn('搜索',()=>doQuery(input.value)); input.addEventListener('keydown',(e)=>{ if(e.key==='Enter') doQuery(input.value); });
+    bar.append(input,btn); el.admBody.appendChild(bar);
     await doQuery('');
   }
-
-  async function renderReportsTab() {
-    const r = await api('GET', '/api/admin/reports');
-    const reports = r.data?.reports || [];
-    const open = reports.filter((x) => x.status === 'open').length;
-    const tb = $('tabReports');
-    tb.innerHTML = '举报处理';
-    if (open) tb.appendChild(el2('span', 'pill', open));
-
-    const rows = reports.map((x) => {
-      const acts = el2('div', 'row-acts');
-      if (x.status === 'open') {
-        acts.append(actBtn('已处理', async () => {
-          await api('POST', `/api/admin/reports/${x.id}`, { status: 'resolved' }); renderAdmin();
-        }));
-        acts.append(actBtn('驳回', async () => {
-          await api('POST', `/api/admin/reports/${x.id}`, { status: 'dismissed' }); renderAdmin();
-        }, true));
-      } else {
-        acts.append(el2('span', null, `${x.handledBy || ''}`));
-      }
-      return [
-        x.reporterName,
-        x.kind === 'dm' ? tag('私聊 ' + (x.convMembers || []).join('↔'), 'mod') : (x.roomName || '—'),
-        x.message ? (x.message.recalled ? '（已撤回）'
-          : (x.message.file ? `[文件] ${x.message.file.name}` : x.message.text)) : '（已删除）',
-        x.reason || '—',
-        tag({ open: '待处理', resolved: '已处理', dismissed: '已驳回' }[x.status], x.status),
-        fullTime(x.createdAt),
-        acts,
-      ];
-    });
-    el.admBody.textContent = '';
-    el.admBody.appendChild(
-      table(['举报人','来源','被举报内容','原因','状态','时间','操作'], rows, '暂无举报'));
+  async function renderReportsTab(){
+    const {data,error}=await sb.rpc('admin_reports');
+    if(error) return showAdmErr(error.message);
+    const open=(data||[]).filter((x)=>x.status==='open').length;
+    const tb=$('tabReports'); tb.innerHTML='举报处理'; if(open) tb.appendChild(el2('span','pill',open));
+    const rows=(data||[]).map((x)=>{ const acts=el2('div','row-acts');
+      if(x.status==='open'){ acts.append(actBtn('已处理',async()=>{ await sb.rpc('resolve_report',{rid:x.id,status:'resolved'}); renderAdmin(); }));
+        acts.append(actBtn('驳回',async()=>{ await sb.rpc('resolve_report',{rid:x.id,status:'dismissed'}); renderAdmin(); },true)); }
+      else acts.append(el2('span',null,`${x.handled_by||''}`));
+      const content=x.message&&!x.message.recalled?(x.message.file_name?`[文件] ${x.message.file_name}`:x.message.text):'（已删除/撤回）';
+      return [x.reporter_name,x.kind==='dm'?`私聊 ${x.conv_key||''}`:(x.room_name||'—'),content,x.reason||'—',
+        tag({open:'待处理',resolved:'已处理',dismissed:'已驳回'}[x.status],x.status),fullTime(x.created_at),acts]; });
+    el.admBody.textContent=''; el.admBody.appendChild(table(['举报人','来源','被举报内容','原因','状态','时间','操作'],rows,'暂无举报'));
+  }
+  async function renderAuditTab(){
+    const {data,error}=await sb.rpc('admin_audit');
+    if(error) return showAdmErr(error.message);
+    const ACTIONS={'user.login':'登录','user.logout':'登出','user.register':'注册','user.register.first-admin':'注册（首个管理员）','user.approve':'审批通过','user.reject':'拒绝申请','user.role':'变更角色','user.status':'变更状态','user.mute':'禁言','user.unmute':'解除禁言','message.recall':'撤回消息','message.delete':'删除消息','room.create':'创建房间','room.delete':'删除房间','room.announce':'修改公告','room.member.add':'添加成员','room.member.remove':'移除成员','report.create':'提交举报','report.handle':'处理举报'};
+    const rows=(data||[]).map((l)=>[fullTime(l.ts),l.actor_name,ACTIONS[l.action]||l.action,l.target||'—',l.detail||'—']);
+    el.admBody.textContent=''; el.admBody.appendChild(table(['时间','操作者','操作','对象','详情'],rows,'暂无审计记录'));
   }
 
-  async function renderAuditTab() {
-    const r = await api('GET', '/api/admin/audit?limit=300');
-    const ACTIONS = {
-      'user.login':'登录','user.logout':'登出','user.register':'注册',
-      'user.register.first-admin':'注册（首个管理员）','user.approve':'审批通过',
-      'user.reject':'拒绝申请','user.role':'变更角色','user.status':'变更状态',
-      'user.mute':'禁言','user.unmute':'解除禁言','message.recall':'撤回消息',
-      'message.delete':'删除消息','room.create':'创建房间','room.delete':'删除房间',
-      'room.announce':'修改公告','room.member.add':'添加成员','room.member.remove':'移除成员',
-      'report.create':'提交举报','report.handle':'处理举报',
-    };
-    const rows = (r.data?.logs || []).map((l) => [
-      fullTime(l.ts), l.actorName, ACTIONS[l.action] || l.action, l.target || '—', l.detail || '—',
-    ]);
-    el.admBody.textContent = '';
-    el.admBody.appendChild(
-      table(['时间','操作者','操作','对象','详情'], rows, '暂无审计记录'));
-  }
-
-  function showAdmErr(msg) {
-    el.admBody.textContent = '';
-    el.admBody.appendChild(el2('div', 'empty', msg || '加载失败'));
+  async function refreshUnread(){
+    const {data}=await sb.rpc('get_unread');
+    unreadTotal=(data&&data.total)||0;
+    el.dmBadge.textContent=unreadTotal>99?'99+':unreadTotal;
+    el.dmBadge.classList.toggle('on',unreadTotal>0);
   }
 
   // ================= 启动 =================
-  api('GET', '/api/me').then((r) => {
-    if (r.status === 200) { me = r.data.user; perms = r.data.permissions; enterApp(); }
+  sb.auth.getSession().then(({data})=>{
+    if(data.session) boot();
     else setAuthMode(false);
   });
-
-  // 房间列表轮询（在线人数变化）
-  setInterval(() => { if (me) api('GET', '/api/rooms').then((r) => {
-    if (r.status === 200) { rooms = r.data.rooms; renderRooms(); }
-  }); }, 8000);
 })();
+
 </script>
 </body>
 </html>
