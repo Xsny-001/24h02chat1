@@ -1,138 +1,119 @@
 # 网页版聊天室（账号体系 · 权限控制 · 私聊）
 
-Node.js + Express + WebSocket 实现的实时聊天应用：多房间、私聊、文件传输，带完整的**注册审批、三角色权限、房间级访问控制和管理后台**。前端为原生单页，无构建步骤。
+基于 **Supabase（Postgres + Auth + Storage + Realtime）+ Cloudflare Pages** 的实时聊天应用：多房间、私聊、文件传输，带完整的**注册审批、三角色权限、房间级访问控制和管理后台**。
+
+> 架构说明：前端为原生单页、**无后端、无构建步骤**。所有数据读写、鉴权、实时推送、文件存储均直连 Supabase；静态资源由 Cloudflare Pages 托管。
 
 ## 快速开始
 
+> 最简路径：先在 Supabase 跑 `supabase/00_all_in_one.sql` 建库，再部署到 Cloudflare Pages。详细步骤见下方「部署指南」与 `SUPABASE_SETUP.md`。
+
 ```bash
-cd chat-app
-npm install
-npm start
+# 1. 在 Supabase SQL Editor 执行 supabase/00_all_in_one.sql（一次建好全部表/策略/函数）
+# 2. 填写 public/supabase-config.js 的真实 URL 与 anon key
+# 3. 用 Cloudflare Pages 连接仓库部署（输出目录 public）
 ```
 
-打开 `http://localhost:3000`。
-
-> **首次使用：注册的第一个账号会自动成为管理员并直接激活**，用它审批后续注册的其他账号。
+打开站点 → 注册**第一个账号自动成为管理员并激活** → 用它审批后续注册用户。
 
 ## 功能总览
 
 ### 聊天
 - **多房间**：内置大厅/技术/闲聊，实时在线人数，公开与私有房间
 - **私聊**：一对一实时会话，会话列表、未读徽标、消息搜索
-- **实时状态**：对方在线/离线、正在输入、已读未读回执
-- **消息操作**：撤回、举报
-- **文件传输**：图片、PDF、Office 文档、压缩包、文本（单文件上限 5MB）
-- **消息持久化**：重启后历史仍在，进房自动加载最近 200 条
-- **断线重连**：自动重连并恢复会话
+- **实时状态**：对方在线/离线（Realtime presence）、正在输入、已读未读回执
+- **消息操作**：撤回（保留原文，管理员在后台可见）、举报
+- **文件传输**：图片、PDF、Office 文档、压缩包、文本（单文件上限 5MB，存于 Supabase Storage `attachments` 桶）
+- **消息持久化**：全部落 Postgres，进房自动加载最近历史
+- **断线重连**：Realtime 自动重连并恢复会话
 
 ### 账号与权限
 - 注册需管理员审批，首个用户自动提权
-- 密码 `scrypt` 加盐哈希存储
-- HttpOnly Cookie 会话，WebSocket 握手阶段即鉴权
-- 三角色（管理员/版主/普通用户）+ 12 个权限点
+- 登录走 Supabase Auth（邮箱 + 密码，默认关闭 Confirm email）
+- 三角色（管理员/版主/普通用户）+ 多权限点
 - 房间级 ACL，私有房间对无权限用户完全不可见
 
-### 管理后台
+### 管理后台（RPC `security definer` 实现）
 用户管理、注册审批、房间管理、消息管理、**私聊审计**、举报处理、审计日志。
 
-## 私聊设计
+## 数据模型
+
+八张表（由 `supabase/schema.sql` 创建，均已开启 RLS）：
+
+| 表 | 用途 |
+|---|---|
+| `users` | 账号、角色（admin/mod/user）、状态（pending/active/banned）、审批 |
+| `rooms` | 房间、是否私有、成员白名单、公告 |
+| `messages` | 房间消息（含图片/附件字段） |
+| `dms` | 私聊消息（会话 key = 双方 id 排序拼接） |
+| `blocks` | 拉黑关系（单向即双向阻断） |
+| `reports` | 举报（房间/私聊来源） |
+| `mutes` | 禁言记录 |
+| `audit` | 审计日志 |
 
 ### 会话模型
-会话用「双方 user id 排序后拼接」作为稳定 key（如 `idA:idB`），保证 A→B 与 B→A 落在同一会话，无需额外建会话表。
-
-### 隐私与可见性
-| 能力 | 说明 |
-|---|---|
-| 发起 | 开放发起，任何已激活用户可私聊他人 |
-| 拉黑 | 单方拉黑即双向阻断收发；黑名单可随时解除 |
-| 撤回 | 撤回自己的消息；版主/管理员可撤回任意私聊消息 |
-| 举报 | 举报对方消息，进入后台举报队列，标注为「私聊」来源 |
-| 管理员可见 | **管理员可在后台查看与搜索全部私聊内容** |
-
-> ⚠️ **合规提示**：私聊界面不会向用户提示「管理员可查看内容」，用户会默认认为私聊是私密的。在多数司法辖区，此类监控需在**隐私政策或用户协议中明确告知**，否则存在合规风险。这是产品与法律决策，实现层面已按需求提供该能力，请务必在上线前补齐告知。
-
-### 文件访问控制
-附件下载需通过鉴权：仅**会话双方**与**管理员**可访问，其他用户即使猜到文件 ID 也会被拒绝（返回 403）。上传时校验 MIME 白名单与大小上限。
+私聊会话用「双方 user id 排序后拼接」作为稳定 key（如 `idA:idB`），保证 A→B 与 B→A 落在同一会话，无需额外建会话表。
 
 ## 权限模型
 
 **角色等级**：`user(1) < mod(2) < admin(3)`
 
-| 权限点 | 最低角色 | 用途 |
+| 权限点 | 最低角色 | 对应 RPC |
 |---|---|---|
-| `chat.send` | user | 房间发言 |
-| `chat.report` | user | 举报消息 |
-| `dm.send` | user | 发送私聊 |
-| `dm.block` | user | 拉黑用户 |
-| `room.create` | mod | 创建房间 |
-| `chat.recall.any` | mod | 撤回他人消息 |
-| `chat.delete.any` | mod | 删除消息 |
-| `user.mute` | mod | 禁言/解禁 |
-| `chat.announce` | mod | 发布房间公告 |
-| `report.handle` | mod | 处理举报 |
-| `user.manage` | admin | 用户管理（角色、封禁） |
-| `user.approve` | admin | 审批注册申请 |
-| `room.manage` | admin | 房间管理 |
-| `audit.view` | admin | 查看审计日志 |
-| `dm.view` | admin | 查看私聊内容 |
+| 发言 | user | `add_report`（举报）等 |
+| 撤回他人消息 | mod | `recall_message` / `recall_dm` |
+| 删除消息 | mod | `delete_message` |
+| 禁言/解禁 | mod | `mute_user` / `unmute_user` |
+| 发布房间公告 | mod | `set_announce` |
+| 处理举报 | mod | `resolve_report` |
+| 审批注册 | admin | `approve_user` / `reject_user` |
+| 用户管理 | admin | `set_user_role` / `set_user_status` |
+| 房间管理 | mod/admin | `add_room` / `delete_room` / `set_member` |
+| 后台数据查看 | admin | `admin_users` / `admin_rooms` / `admin_messages` / `admin_dms` / `admin_reports` / `admin_audit` |
 
-权限在**每次 HTTP 请求与每条 WebSocket 消息时重新判定**，角色变更立即生效，无需重新登录。管理员查看私聊搜索会留下 `dm.inspect` 审计记录。
+> 所有写操作只经由 `supabase/rpc.sql` 的 `security definer` 函数，角色校验在服务端执行，前端无法绕过。
 
 ## 项目结构
 
 ```
 chat-app/
-├── server.js              # 入口：HTTP + WebSocket，握手鉴权与消息分发
-├── lib/
-│   ├── auth.js            # 密码哈希、会话、权限判定
-│   ├── store.js           # 数据层：用户/房间/消息/私聊/举报/禁言/审计/文件
-│   └── routes.js          # HTTP 路由与权限中间件
-├── public/index.html      # 前端单页（登录、聊天、私聊、管理后台）
-├── test-auth.js           # 后端权限测试（48 项）
-├── test-dm.js             # 私聊后端测试（59 项）
-├── test-ui.js             # 聊天 UI 测试（49 项）
-├── test-dm-ui.js          # 私聊 UI 测试（43 项）
-├── shots.js               # 截图生成脚本
-├── make-shots.sh          # 重置数据并生成截图
-├── screenshots/           # 界面截图
-└── data/
-    ├── store.json         # 数据存储（自动生成）
-    └── uploads/           # 上传的附件（自动生成）
+├── public/
+│   ├── index.html          # 前端单页（登录、聊天、私聊、管理后台），直连 Supabase
+│   └── supabase-config.js  # 前端 Supabase 配置（URL + anon key）
+├── supabase/
+│   ├── 00_all_in_one.sql   # 一键建库：schema→triggers→policies→rpc→rpc_patch→06（幂等可重复执行）
+│   ├── schema.sql          # 建表 + 索引 + 开启 RLS + attachments 桶
+│   ├── triggers.sql        # 新用户自动建档（首用户=管理员，其余=待审批）
+│   ├── policies.sql        # 行级安全策略
+│   ├── rpc.sql             # 全部管理动作与后台查询（security definer）
+│   ├── rpc_patch.sql       # 补丁：本人撤回、私聊举报
+│   └── 06_fix_images_recall.sql # 房间消息支持图片/附件 + 撤回保留原文
+├── SUPABASE_SETUP.md       # 详细部署与执行指南
+└── README.md
 ```
 
-## 测试
+## 部署指南（概要）
 
-```bash
-# 后端测试（需服务运行中）
-npm test          # 权限与账号体系
-npm run test:dm   # 私聊功能
+完整步骤见 `SUPABASE_SETUP.md`。要点：
 
-# 浏览器 UI 测试（需 playwright）
-npm run test:ui
-npm run test:dm-ui
-```
+1. **建库**：Supabase SQL Editor 执行 `supabase/00_all_in_one.sql`。
+2. **Auth**：关闭 Confirm email；Site URL 填 Cloudflare 域名。
+3. **前端配置**：`public/supabase-config.js` 填 `SUPABASE_URL` 与 `SUPABASE_ANON_KEY`。
+4. **Realtime**：确保 `messages`、`dms` 表已开启 Realtime。
+5. **CORS**：Supabase API CORS 加入前端域名（开发期可临时 `*`）。
+6. **部署**：Cloudflare Pages 连接仓库 `Xsny-001/24h02chat1`，Framework preset 选 **None**，Build command 留空，Output directory 填 **`public`**。
 
-当前结果：**后端 107 项 + UI 92 项 = 199 项断言全部通过**。
+> ⚠️ 已上线、之前只跑过前 5 个 SQL 文件的用户：**只需补跑 `supabase/06_fix_images_recall.sql`** 即可开启图片发送与「撤回保留原文」。
 
-覆盖重点（含负向用例）：
+## 合规提示
 
-- 密码哈希落盘校验、明文不入库、用户名/密码校验、不泄露账号是否存在
-- 未审批登录拦截、未登录 401、无效会话 WebSocket 握手拒绝
-- 越权访问 403、跨用户撤回限制、**服务端层面的禁言拦截**（绕过 UI 直连 WebSocket 也无法发送）
-- 私有房间隔离（不可见 + 直连进房被拒 + 白名单生效）
-- 私聊会话隔离（无关用户看不到他人会话与文件）、拉黑双向阻断
-- 文件上传类型白名单、**非会话成员下载被拒**
-- 管理员私聊查看与搜索、普通用户访问私聊审计 403
-- 防自封禁、防降级/封禁最后一个管理员、防自我拉黑
-- 页面无未捕获 JS 报错
+- **私聊审计**：管理员可在后台查看全部私聊内容。此类监控须在**隐私政策或用户协议中明确告知**用户，否则存在合规风险。实现已按需求提供该能力，上线前请补齐告知。
+- **安全边界**：`anon key` 放前端是标准做法，安全由 RLS + RPC 角色校验保证；`service_role key` 仅用于本地执行 SQL 迁移，**绝不下发前端或写入仓库**。
 
 ## 生产环境注意事项
 
-- **传输加密**：必须置于 HTTPS/WSS 之后，否则 Cookie 与消息明文暴露
-- **私聊告知义务**：管理员可查看私聊，须在隐私政策中告知用户（见上文）
-- **CSRF 防护**：目前依赖 `SameSite=Lax`，跨站场景应加 CSRF Token
-- **持久化数据库**：JSON 文件适合中小流量，高并发建议换 SQLite/PostgreSQL，会话迁至 Redis
-- **多实例部署**：需 Redis Pub/Sub 同步广播与会话
-- **速率限制**：登录、注册、发消息、上传均未限流，存在被刷风险
-- **文件存储**：当前落本地磁盘，生产建议换对象存储并做病毒扫描
-- **审计留存**：上限 2000 条，长期合规留存需落库
+- **传输加密**：Cloudflare Pages 默认提供 HTTPS，确保全程加密。
+- **私聊告知义务**：管理员可查看私聊，须在隐私政策中告知用户。
+- **速率限制**：登录、注册、发消息、上传未做限流，存在被刷风险，建议 Cloudflare 层加 WAF/速率规则。
+- **存储**：附件进 Supabase Storage，建议配置大小与类型校验、病毒扫描。
+- **审计留存**：`audit` 表有上限，长期合规留存需另行归档。
