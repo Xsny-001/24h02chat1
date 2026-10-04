@@ -520,6 +520,7 @@
   let dmTypingTimer=null; const dmTypingPeers=new Map(); let dmSearchTimer=null;
   const onlinePeers=new Set();
   let roomCh=null, dmCh=null, presenceUsers=[];
+  let pendingFile=null;   // 待发送附件（已在选文件时上传，发送时一并写入）
 
   // 私聊发送通道：Supabase 只有在 channel 已 subscribe(join) 后广播才能送达，
   // 因此每个对端维护一个已订阅的发送通道，并在打开会话时提前订阅。
@@ -534,7 +535,8 @@
   }
 
   // 字段归一化：Supabase snake_case → 前端 camelCase
-  const normMsg = (m) => ({ id:m.id, userId:m.user_id, nick:m.nick, text:m.text, ts:m.ts, recalled:m.recalled, recalledBy:m.recalled_by });
+  const normMsg = (m) => ({ id:m.id, userId:m.user_id, nick:m.nick, text:m.text, ts:m.ts, recalled:m.recalled, recalledBy:m.recalled_by,
+    file: m.file_stored ? { stored:m.file_stored, name:m.file_name, size:m.file_size, mime:m.file_mime } : null });
   const normDm = (m) => ({
     id:m.id, convKey:m.conv_key, fromId:m.from_id, toId:m.to_id, nick:m.nick, text:m.text, ts:m.ts,
     recalled:m.recalled, recalledBy:m.recalled_by, readAt:m.read_at,
@@ -658,6 +660,7 @@
     roomCh.on('presence',{event:'join'},({newPresences})=>{ newPresences.forEach((p)=>addSystem(`${p.username||'某人'} 加入了房间`)); });
     roomCh.on('presence',{event:'leave'},({oldPresences})=>{ oldPresences.forEach((p)=>addSystem(`${p.username||'某人'} 离开了房间`)); });
     roomCh.on('broadcast',{event:'typing'},({payload})=>{ if(payload.nick!==me.username) setTyping(payload.nick,payload.active); });
+    roomCh.on('broadcast',{event:'recalled'},({payload})=>{ if(payload&&payload.messageId) markRecalled(payload.messageId,payload.by); });
     roomCh.subscribe(async(status)=>{
       if(status==='SUBSCRIBED'){
         await roomCh.track({id:me.id,username:me.username});
@@ -710,8 +713,11 @@
     const body=el2('div','body');
     const top=el2('div','top');
     top.append(el2('b',null,self?'我':m.nick),el2('span',null,timeOf(m.ts)));
+    if(m.file&&!m.recalled) body.append(buildAttach(m.file));
     const bubble=el2('div','bubble');
-    bubble.textContent=m.recalled?'消息已撤回':m.text;
+    if(m.recalled) bubble.textContent='消息已撤回';
+    else if(m.text) bubble.textContent=m.text;
+    else bubble.textContent='[附件]';
     const acts=el2('div','acts');
     if(!m.recalled){
       if(self||can('chat.recall.any')){
@@ -735,13 +741,17 @@
     el.feed.appendChild(wrap); scrollDown();
   }
   function recallRoomMessage(mid){
-    sb.rpc('recall_message',{rid:roomId,mid}).then(()=>markRecalled(mid,'你'));
+    sb.rpc('recall_message',{rid:roomId,mid}).then(()=>{
+      markRecalled(mid,'你');
+      if(roomCh) roomCh.send({type:'broadcast',event:'recalled',payload:{messageId:mid,by:'你'}});
+    }).catch((e)=>toast('撤回失败：'+(e.message||e)));
   }
   function markRecalled(messageId,by){
     const wrap=el.feed.querySelector(`[data-id="${messageId}"]`);
     if(!wrap) return;
     wrap.classList.add('recalled');
-    wrap.querySelector('.bubble').textContent=`消息已被 ${by} 撤回`;
+    const b=wrap.querySelector('.bubble'); if(b) b.textContent=`消息已被 ${by} 撤回`;
+    const at=wrap.querySelector('.attach-card'); if(at) at.remove();
     const acts=wrap.querySelector('.acts'); if(acts) acts.textContent='';
   }
   function renderUsers(users){
@@ -777,13 +787,14 @@
   // ================= 发送消息 =================
   async function sendMessage(){
     const text=el.input.value.replace(/\s+$/,'');
-    if(!text||!me) return;
+    if(!me) return;
     if(muteUntil>Date.now()) return;
     if(mode==='dm'){ if(peer) await sendDm(text); }
     else if(roomId){
-      const {data,error}=await sb.from('messages')
-        .insert({room_id:roomId,user_id:me.id,nick:me.username,text,ts:Date.now()})
-        .select().single();
+      const file=pendingFile; pendingFile=null; el.uploadBar.className='upload-bar';
+      const rec={room_id:roomId,user_id:me.id,nick:me.username,text:text||'',ts:Date.now()};
+      if(file){ rec.file_stored=file.stored; rec.file_name=file.name; rec.file_size=file.size; rec.file_mime=file.mime; }
+      const {data,error}=await sb.from('messages').insert(rec).select().single();
       if(error){ toast('发送失败：'+error.message); return; }
       addMessage(normMsg(data));   // 本地立即渲染，不依赖实时回显
     }
@@ -972,7 +983,9 @@
   async function sendDm(text){
     if(!peer) return;
     if(peerBlocked||peerBlockedMe){ toast('无法发送：你们之间存在拉黑关系'); return; }
-    const rec={conv_key:convKey,from_id:me.id,to_id:peer.id,nick:me.username,text,ts:Date.now()};
+    const file=pendingFile; pendingFile=null; el.uploadBar.className='upload-bar';
+    const rec={conv_key:convKey,from_id:me.id,to_id:peer.id,nick:me.username,text:text||'',ts:Date.now()};
+    if(file){ rec.file_stored=file.stored; rec.file_name=file.name; rec.file_size=file.size; rec.file_mime=file.mime; }
     const {data,error}=await sb.from('dms').insert(rec).select().single();
     if(error){ toast('发送失败'); return; }
     addDmMessage(normDm(data));   // 发送方本地立即渲染
@@ -1038,8 +1051,8 @@
   };
   document.addEventListener('click',()=>{ document.querySelectorAll('.menu').forEach((m)=>m.remove()); });
 
-  // ================= 文件上传 =================
-  el.attachBtn.onclick=()=>{ if(mode!=='dm'||!peer) return toast('文件发送仅支持私聊'); el.fileInput.click(); };
+  // ================= 文件上传（房间 / 私聊通用）=================
+  el.attachBtn.onclick=()=>{ el.fileInput.click(); };
   el.fileInput.onchange=async()=>{
     const f=el.fileInput.files&&el.fileInput.files[0];
     if(!f) return;
@@ -1047,15 +1060,14 @@
     el.uploadBar.className='upload-bar on'; el.uploadBar.textContent=`正在上传 ${f.name} …`;
     try{
       const ext=(f.name.includes('.')?'.'+f.name.split('.').pop():'');
-      const path=`dm/${convKey}/${crypto.randomUUID()}${ext}`;
+      const sub=(mode==='dm'&&peer)?`dm/${convKey}`:`room/${roomId}`;
+      if(mode!=='dm' && !roomId) throw new Error('请先进入一个房间');
+      const path=`${sub}/${crypto.randomUUID()}${ext}`;
       const {error}=await sb.storage.from('attachments').upload(path,f);
       if(error) throw new Error(error.message);
-      const rec={conv_key:convKey,from_id:me.id,to_id:peer.id,nick:me.username,text:'',ts:Date.now(),
-        file_stored:path,file_name:f.name,file_size:f.size,file_mime:f.type};
-      const {data,error:e2}=await sb.from('dms').insert(rec).select().single();
-      if(e2) throw new Error(e2.message);
-      dmChTo(peer.id).send({type:'broadcast',event:'message',payload:normDm(data)});
-      el.uploadBar.textContent='上传完成'; setTimeout(()=>{ el.uploadBar.className='upload-bar'; },1200);
+      pendingFile={stored:path,name:f.name,size:f.size,mime:f.type};
+      el.uploadBar.textContent='附件就绪：'+f.name+'（发送时一并发出）';
+      setTimeout(()=>{ if(el.uploadBar.textContent.indexOf('就绪')>=0) el.uploadBar.className='upload-bar'; },2500);
     }catch(err){ el.uploadBar.className='upload-bar'; toast('上传失败：'+err.message); }
     el.fileInput.value='';
   };
@@ -1174,7 +1186,7 @@
         if(m.recalled) acts.append(el2('span',null,'已撤回'));
         else { acts.append(actBtn('撤回',async()=>{ await sb.rpc('recall_message',{rid:m.room_id,mid:m.id}); toast('已撤回'); doQuery(q,roomFilter); }));
           acts.append(actBtn('删除',async()=>{ if(confirm('永久删除该消息？')){ await sb.rpc('delete_message',{rid:m.room_id,mid:m.id}); doQuery(q,roomFilter); } },true)); }
-        return [m.room_name,m.nick,m.recalled?'（已撤回）':m.text,fullTime(m.ts),acts]; });
+        return [m.room_name,m.nick,m.recalled?(can('chat.recall.any')?('（已撤回）'+m.text):'（已撤回）'):m.text,fullTime(m.ts),acts]; });
       el.admBody.appendChild(table(['房间','发送者','内容','时间','操作'],rows,'没有匹配的消息'));
     };
     const bar=el2('div','bar');
@@ -1196,7 +1208,7 @@
       const rows=(data||[]).map((m)=>{ const acts=el2('div','row-acts');
         if(m.recalled) acts.append(el2('span',null,'已撤回'));
         else acts.append(actBtn('撤回',async()=>{ await sb.rpc('recall_dm',{conv:m.conv_key,mid:m.id}); toast('已撤回'); doQuery(q); }));
-        const content=m.recalled?'（已撤回）':(m.file_name?`[文件] ${m.file_name}`:(m.text||''));
+        const content=m.recalled?(can('chat.recall.any')?('（已撤回）'+(m.file_name?`[文件] ${m.file_name}`:(m.text||''))):'（已撤回）'):(m.file_name?`[文件] ${m.file_name}`:(m.text||''));
         return [`${m.from_name} ↔ ${m.to_name}`,m.from_name,content,fullTime(m.ts),acts]; });
       const note=el2('div',null,`命中 ${rows.length} 条`); note.style.cssText='font-size:12px;color:var(--muted);margin-bottom:10px';
       el.admBody.appendChild(note);
